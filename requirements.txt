@@ -1,3 +1,4 @@
 streamlit
 PyMuPDF
 Pillow
+python-pptx

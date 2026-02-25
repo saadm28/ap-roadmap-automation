@@ -12,7 +12,7 @@ CHART_CROPS = {
     },
     "cashflow": {
         "anchors": ["Financial Summary"],
-        "crop": (20, 210, 575, 465),  # Chart only; no titles or "Asset Allocation" text
+        "crop": (20, 235, 575, 465),  # Chart only; extra top crop to remove white space (Slide 9 & 12)
     },
     "liquid_assets": {
         "anchors": ["Liquid Assets"],
