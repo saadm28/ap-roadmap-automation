@@ -1,0 +1,53 @@
+# Virtual environment
+sjp-automation-venv/
+venv/
+.venv/
+env/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Output and temp
+output/
+_tmp_*.pdf
+*.zip
+test_estate_slide24_*.png
+
+# Streamlit (keep .streamlit/config.toml in repo; ignore secrets)
+.streamlit/secrets.toml
+
+# IDE / OS
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# Env files (if you add secrets later)
+.env
+.env.local
+*.pem
+
+
+# client docs
+client_documents
