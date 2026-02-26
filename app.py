@@ -24,8 +24,23 @@ ROADMAP_KEYS = (
     "roadmap_all_charts",
     "roadmap_diff_annual",
     "roadmap_diff_monthly",
+    "roadmap_template_type",
+    "roadmap_pptx_filename",
 )
 UPLOAD_RESET_KEY = "roadmap_upload_reset_key"
+
+
+def _template_path(template_type: str) -> Path:
+    """Path to the selected template in templates folder."""
+    name = "Lawyers_Roadmap.pptx" if template_type == "Lawyers" else "Generic_RoadMap.pptx"
+    return Path(__file__).resolve().parent / "templates" / name
+
+
+def _roadmap_output_filename(template_type: str) -> str:
+    """Professional filename: AP Partners - Generic/Lawyers RoadMap - YYYY-MM-DD_HHMMSS.pptx"""
+    label = "Lawyers" if template_type == "Lawyers" else "Generic"
+    ts = datetime.now().strftime("%Y-%m-%d_%H%M%S")
+    return f"AP Partners - {label} RoadMap - {ts}.pptx"
 
 
 def _clear_roadmap_state():
@@ -44,14 +59,17 @@ def _render_results(output_dir: Path, pre_values: dict, post_values: dict, all_c
 
     # Message and primary actions first
     st.success("Review complete. Your RoadMap is ready.")
-    tpl = Path(__file__).resolve().parent / "templates" / "Generic_RoadMap.pptx"
+    template_type = st.session_state.get("roadmap_template_type", "Generic")
+    tpl = _template_path(template_type)
     if tpl.exists():
-        pptx_path = output_dir / "RoadMap_GENERATED.pptx"
+        pptx_filename = st.session_state.get("roadmap_pptx_filename")
+        pptx_path = output_dir / pptx_filename if pptx_filename else output_dir / "RoadMap_GENERATED.pptx"
         if pptx_path.exists():
+            download_label = f"Download {template_type} RoadMap PPTX"
             st.download_button(
-                "Download RoadMap PPTX",
+                download_label,
                 data=pptx_path.read_bytes(),
-                file_name="RoadMap_GENERATED.pptx",
+                file_name=pptx_filename or "RoadMap_GENERATED.pptx",
                 mime="application/vnd.openxmlformats-officedocument.presentationml.presentation",
                 type="primary",
                 use_container_width=True,
@@ -67,7 +85,7 @@ def _render_results(output_dir: Path, pre_values: dict, post_values: dict, all_c
                 pass
             st.rerun()
     else:
-        st.info("Place **Generic_RoadMap.pptx** in the `templates/` folder to enable Download RoadMap PPTX.")
+        st.info("Place the selected template in the `templates/` folder to enable Download RoadMap PPTX.")
         if st.button("Create another RoadMap", type="secondary", use_container_width=True, key=f"reset_no_pptx_{key_prefix}"):
             _clear_roadmap_state()
             st.rerun()
@@ -309,10 +327,14 @@ if generate:
         st.session_state["roadmap_all_charts"] = all_charts
         st.session_state["roadmap_diff_annual"] = diff_annual
         st.session_state["roadmap_diff_monthly"] = diff_monthly
+        st.session_state["roadmap_template_type"] = template_type
 
-        template_path = Path(__file__).resolve().parent / "templates" / "Generic_RoadMap.pptx"
+        pptx_filename = _roadmap_output_filename(template_type)
+        st.session_state["roadmap_pptx_filename"] = pptx_filename
+
+        template_path = _template_path(template_type)
         if template_path.exists():
-            generated_pptx = output_dir / "RoadMap_GENERATED.pptx"
+            generated_pptx = output_dir / pptx_filename
             try:
                 populate_roadmap_pptx(
                     template_path=template_path,
@@ -331,6 +353,7 @@ if generate:
                     post_not_funded_years=post_values.get("post_not_funded_years"),
                     post_funded_years=post_values.get("post_funded_years"),
                     post_retirement_spending=post_values.get("post_retirement_spending"),
+                    template_type=template_type,
                 )
             except Exception as e:
                 st.exception(e)

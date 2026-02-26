@@ -13,15 +13,18 @@ from pptx.enum.shapes import MSO_SHAPE_TYPE
 logger = logging.getLogger(__name__)
 
 
-# Slide index (0-based) for each target slide
+# Slide index (0-based) for each target slide (Generic template)
 SLIDE_6 = 5
 SLIDE_8 = 7
 SLIDE_9 = 8
 SLIDE_12 = 11
 SLIDE_13 = 12
 SLIDE_14 = 13
-SLIDE_19 = 18
-SLIDE_24 = 23
+SLIDE_19 = 18   # Generic: comparison charts
+SLIDE_24 = 23   # Generic: post estate
+# Lawyers template: comparison charts = Slide 22 (index 21), post estate = Slide 27 (index 26)
+SLIDE_22_LAWYERS = 21
+SLIDE_27_LAWYERS = 26
 
 
 def _fmt_liquid_millions(value: Optional[int]) -> str:
@@ -139,11 +142,15 @@ def populate_roadmap_pptx(
     post_not_funded_years: Optional[int] = None,
     post_funded_years: Optional[int] = None,
     post_retirement_spending: Optional[int] = None,
+    template_type: str = "Generic",
 ) -> None:
     """
     charts_dir is the charts folder (output_dir / "charts").
     all_charts maps key -> relative path e.g. "charts/pre_timeline_page4.png"; base is output_dir so full path = charts_dir.parent / rel_path.
+    template_type: "Generic" (Slide 19 = comparison, Slide 24 = estate) or "Lawyers" (Slide 22 = comparison, Slide 27 = estate).
     """
+    slide_comparison = SLIDE_22_LAWYERS if template_type == "Lawyers" else SLIDE_19
+    slide_estate = SLIDE_27_LAWYERS if template_type == "Lawyers" else SLIDE_24
     prs = Presentation(str(template_path))
     base_dir = charts_dir.parent
 
@@ -227,20 +234,20 @@ def populate_roadmap_pptx(
         }
         _replace_text_tokens(slide14, tokens_14)
 
-    # Slide 19 – comparison charts 1..4
-    if len(prs.slides) > SLIDE_19:
-        s19 = prs.slides[SLIDE_19]
+    # Slide 19 (Generic) / Slide 22 (Lawyers) – comparison charts 1..4
+    if len(prs.slides) > slide_comparison:
+        s_comp = prs.slides[slide_comparison]
         for i in range(1, 5):
             key = f"slide19_comparison_chart_{i}"
             path = chart_path(key)
             if path and path.exists():
-                _replace_shape_with_image(s19, f"COMP_CHART_{i}", path)
+                _replace_shape_with_image(s_comp, f"COMP_CHART_{i}", path)
             # else leave placeholder as-is
 
-    # Slide 24 – post estate
-    if len(prs.slides) > SLIDE_24:
+    # Slide 24 (Generic) / Slide 27 (Lawyers) – post estate
+    if len(prs.slides) > slide_estate:
         path = chart_path("slide24_estate_analysis")
         if path:
-            _replace_shape_with_image(prs.slides[SLIDE_24], "POST_ESTATE_IMAGE", path)
+            _replace_shape_with_image(prs.slides[slide_estate], "POST_ESTATE_IMAGE", path)
 
     prs.save(str(output_path))
