@@ -74,7 +74,7 @@ def _render_results(output_dir: Path, pre_values: dict, post_values: dict, all_c
 
     # Divider before optional review (extractions and charts)
     st.divider()
-    st.caption("Optional: review extracted values and charts below.")
+    st.caption("Review extracted values and charts below.")
 
     st.subheader("Extracted values")
     st.markdown("**Pre-Advice**")
@@ -101,7 +101,7 @@ def _render_results(output_dir: Path, pre_values: dict, post_values: dict, all_c
         use_container_width=True,
         hide_index=True,
     )
-    st.markdown("**Pre vs Post (Slide 6)**")
+    st.markdown("**Slide 6 — Liquid Assets & Retirement Spending**")
     st.dataframe(
         [
             {"Metric": "Retirement Spending Increase (Annual)", "Value": f"£{diff_annual:,}"},
@@ -111,6 +111,32 @@ def _render_results(output_dir: Path, pre_values: dict, post_values: dict, all_c
         use_container_width=True,
         hide_index=True,
     )
+
+    # Slide 14 — Retirement Summary (Financial Summary placeholders)
+    def _fmt_gbp(v):
+        return f"£{v:,}" if v is not None else "—"
+    slide14_pre = [
+        {"Metric": "Shortfall years", "Value": pre_values.get("shortfall_years") if pre_values.get("shortfall_years") is not None else "—"},
+        {"Metric": "Total retirement years", "Value": pre_values.get("total_retirement_years") if pre_values.get("total_retirement_years") is not None else "—"},
+        {"Metric": "Pre funded years (derived)", "Value": (pre_values.get("total_retirement_years") - pre_values.get("shortfall_years")) if (pre_values.get("total_retirement_years") is not None and pre_values.get("shortfall_years") is not None) else "—"},
+        {"Metric": "Lump sum required", "Value": _fmt_gbp(pre_values.get("lump_sum_required"))},
+        {"Metric": "Retirement year (lump sum)", "Value": pre_values.get("retirement_year_lump") if pre_values.get("retirement_year_lump") is not None else "—"},
+        {"Metric": "Annual savings required", "Value": _fmt_gbp(pre_values.get("annual_savings_required"))},
+    ]
+    slide14_post = [
+        {"Metric": "Years expenses not funded", "Value": post_values.get("post_not_funded_years") if post_values.get("post_not_funded_years") is not None else "—"},
+        {"Metric": "Years expenses funded", "Value": post_values.get("post_funded_years") if post_values.get("post_funded_years") is not None else "—"},
+        {"Metric": "Post retirement spending", "Value": _fmt_gbp(post_values.get("post_retirement_spending"))},
+    ]
+    st.markdown("**Slide 14 — Retirement Summary**")
+    c14a, c14b = st.columns(2)
+    with c14a:
+        st.caption("From Pre-Advice PDF")
+        st.dataframe(slide14_pre, use_container_width=True, hide_index=True)
+    with c14b:
+        st.caption("From Post-Advice PDF")
+        st.dataframe(slide14_post, use_container_width=True, hide_index=True)
+
     st.subheader("Extracted charts")
 
     def show_chart(rel_path: str, title: str, slide_info: str) -> None:
@@ -297,6 +323,14 @@ if generate:
                     retirement_monthly_diff=diff_monthly,
                     liquid_pre=pre_values.get("liquid_assets_retirement"),
                     liquid_post=post_values.get("liquid_assets_retirement"),
+                    shortfall_years=pre_values.get("shortfall_years"),
+                    total_retirement_years=pre_values.get("total_retirement_years"),
+                    lump_sum_required=pre_values.get("lump_sum_required"),
+                    retirement_year=pre_values.get("retirement_year_lump"),
+                    annual_savings_required=pre_values.get("annual_savings_required"),
+                    post_not_funded_years=post_values.get("post_not_funded_years"),
+                    post_funded_years=post_values.get("post_funded_years"),
+                    post_retirement_spending=post_values.get("post_retirement_spending"),
                 )
             except Exception as e:
                 st.exception(e)

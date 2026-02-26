@@ -19,6 +19,7 @@ SLIDE_8 = 7
 SLIDE_9 = 8
 SLIDE_12 = 11
 SLIDE_13 = 12
+SLIDE_14 = 13
 SLIDE_19 = 18
 SLIDE_24 = 23
 
@@ -31,6 +32,13 @@ def _fmt_liquid_millions(value: Optional[int]) -> str:
     if millions == int(millions):
         return f"c.£{int(millions)}m"
     return f"c.£{millions:.1f}m"
+
+
+def _fmt_gbp(value: Optional[int]) -> str:
+    """Format int as £ with commas for Slide 14 (and similar)."""
+    if value is None:
+        return "—"
+    return f"£{value:,}"
 
 
 def _get_slide_text(slide) -> str:
@@ -123,6 +131,14 @@ def populate_roadmap_pptx(
     retirement_monthly_diff: int,
     liquid_pre: Optional[int] = None,
     liquid_post: Optional[int] = None,
+    shortfall_years: Optional[int] = None,
+    total_retirement_years: Optional[int] = None,
+    lump_sum_required: Optional[int] = None,
+    retirement_year: Optional[int] = None,
+    annual_savings_required: Optional[int] = None,
+    post_not_funded_years: Optional[int] = None,
+    post_funded_years: Optional[int] = None,
+    post_retirement_spending: Optional[int] = None,
 ) -> None:
     """
     charts_dir is the charts folder (output_dir / "charts").
@@ -159,7 +175,7 @@ def populate_roadmap_pptx(
     if len(prs.slides) > SLIDE_8:
         path = chart_path("pre_timeline")
         if path:
-            _replace_shape_with_image(prs.slides[SLIDE_8], "TIMELINE_IMAGE", path)
+            _replace_shape_with_image(prs.slides[SLIDE_8], "[TIMELINE_IMAGE]", path)
 
     # Slide 9 – pre cashflow (top) + pre liquid (bottom)
     # Placeholder names in template Selection Pane: PRE_CASHFLOW_IMAGE = top, PRE_LIQUID_IMAGE = bottom
@@ -192,7 +208,24 @@ def populate_roadmap_pptx(
         if p:
             _replace_shape_with_image(s13, "POST_LIQUID_COMPARISON", p)
 
-    # Slide 14 – skip
+    # Slide 14 – Financial Summary (from pre + post PDFs; replace placeholders in existing text)
+    if len(prs.slides) > SLIDE_14:
+        slide14 = prs.slides[SLIDE_14]
+        pre_funded_years: Optional[int] = None
+        if total_retirement_years is not None and shortfall_years is not None:
+            pre_funded_years = total_retirement_years - shortfall_years
+        tokens_14 = {
+            "{{SHORTFALL_YEARS}}": str(shortfall_years) if shortfall_years is not None else "—",
+            "{{TOTAL_RETIREMENT_YEARS}}": str(total_retirement_years) if total_retirement_years is not None else "—",
+            "{{PRE_FUNDED_YEARS}}": str(pre_funded_years) if pre_funded_years is not None else "—",
+            "{{LUMP_SUM_REQUIRED}}": _fmt_gbp(lump_sum_required),
+            "{{RETIREMENT_YEAR}}": str(retirement_year) if retirement_year is not None else "—",
+            "{{ANNUAL_SAVINGS_REQUIRED}}": _fmt_gbp(annual_savings_required),
+            "{{POST_NOT_FUNDED_YEARS}}": str(post_not_funded_years) if post_not_funded_years is not None else "—",
+            "{{POST_FUNDED_YEARS}}": str(post_funded_years) if post_funded_years is not None else "—",
+            "{{POST_RETIREMENT_SPENDING}}": _fmt_gbp(post_retirement_spending),
+        }
+        _replace_text_tokens(slide14, tokens_14)
 
     # Slide 19 – comparison charts 1..4
     if len(prs.slides) > SLIDE_19:

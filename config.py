@@ -8,7 +8,7 @@ No hardcoded page numbers.
 CHART_CROPS = {
     "timeline": {
         "anchors": ["Events & Goals"],
-        "crop": (20, 130, 575, 720),  # Full timeline from visual bar through event cards
+        "crop": (20, 130, 575, 430),  # Timeline only: legend, age axis, colored bar, event icons; include age numbers
     },
     "cashflow": {
         "anchors": ["Financial Summary"],

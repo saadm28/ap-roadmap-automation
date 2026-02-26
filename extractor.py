@@ -28,6 +28,47 @@ DEFAULT_RETIREMENT_YEAR = 2038
 LIQUID_TABLE_ROW_LABELS = frozenset({"Savings", "Investments", "Pensions"})
 LIQUID_ASSETS_HEADING = "Liquid Assets"
 
+# Slide 14: anchor phrases to find the correct page (NOT "Financial Summary" intro).
+SLIDE14_ANCHOR_PHRASES = [
+    "Retirement Summary",
+    "Expenses are not funded",
+    "Expenses are funded",
+    "You can afford to spend",
+    "shortfall",
+    "additional lump sum",
+    "save an additional",
+]
+
+
+def _find_slide14_page(doc: fitz.Document) -> tuple[Optional[int], Optional[str], str]:
+    """Find page with Slide 14 content: must contain an anchor phrase AND at least one regex match (skip intro pages)."""
+    # Patterns we need at least one of (same as in _extract_financial_summary_slide14)
+    any_match = re.compile(
+        r"shortfall\s+in\s+\d+\s+of\s+\d+\s+retirement\s+years"
+        r"|additional\s+lump\s+sum\s+of\s+£[\d,]+\s+in\s+\d{4}"
+        r"|(?:save\s+an\s+additional\s+£[\d,]+\s+per\s+year|Save\s+an\s+additional\s+£[\d,]+\s+annually)"
+        r"|Expenses\s+are\s+not\s+funded\s+in\s+\d+\s+years"
+        r"|Expenses\s+are\s+funded\s+in\s+\d+\s+years"
+        r"|You\s+can\s+afford\s+to\s+spend\s+£[\d,]+\s+(?:per\s+year|annually)",
+        re.IGNORECASE,
+    )
+    for i in range(len(doc)):
+        text = get_page_text(doc, i)
+        if not any_match.search(text):
+            continue
+        for anchor in SLIDE14_ANCHOR_PHRASES:
+            if anchor in text:
+                pos = text.find(anchor)
+                start = max(0, pos - 200)
+                end = min(len(text), pos + 400)
+                snippet = text[start:end]
+                if start > 0:
+                    snippet = "…" + snippet
+                if end < len(text):
+                    snippet = snippet + "…"
+                return (i, anchor, snippet)
+    return (None, None, "")
+
 
 # ---------------------------------------------------------------------------
 # Page finding by anchor
@@ -76,7 +117,178 @@ def extract_values_from_doc(doc: fitz.Document) -> dict[str, Optional[int]]:
         result[key] = extract_value_from_text(text, cfg["regex"])
     # Liquid assets at retirement: from table (Savings + Investments + Pensions) at retirement year, not regex
     result["liquid_assets_retirement"] = _extract_liquid_assets_table_total(doc)
+    # Slide 14: Retirement Summary / shortfall / funding page (anchor phrase search, not "Financial Summary" intro)
+    result.update(_extract_financial_summary_slide14(doc))
     return result
+
+
+def _extract_financial_summary_slide14(doc: fitz.Document, spans_out: Optional[dict[str, str]] = None) -> dict[str, Optional[int]]:
+    """Find page by Slide 14 anchor phrases and extract placeholders. If spans_out is provided, record matched text span for each key."""
+    page_num, _anchor, _snippet = _find_slide14_page(doc)
+    if page_num is None:
+        return {
+            "shortfall_years": None,
+            "total_retirement_years": None,
+            "lump_sum_required": None,
+            "retirement_year_lump": None,
+            "annual_savings_required": None,
+            "post_not_funded_years": None,
+            "post_funded_years": None,
+            "post_retirement_spending": None,
+        }
+    text = get_page_text(doc, page_num)
+    flags = re.IGNORECASE | re.DOTALL
+    out = {
+        "shortfall_years": None,
+        "total_retirement_years": None,
+        "lump_sum_required": None,
+        "retirement_year_lump": None,
+        "annual_savings_required": None,
+        "post_not_funded_years": None,
+        "post_funded_years": None,
+        "post_retirement_spending": None,
+    }
+    m = re.search(r"shortfall\s+in\s+(\d+)\s+of\s+(\d+)\s+retirement\s+years", text, flags)
+    if m:
+        out["shortfall_years"] = int(m.group(1))
+        out["total_retirement_years"] = int(m.group(2))
+        if spans_out is not None:
+            spans_out["shortfall_years"] = m.group(0)[:300]
+            spans_out["total_retirement_years"] = m.group(0)[:300]
+    # LUMP_SUM_REQUIRED + RETIREMENT_YEAR: first try both in one go (DOTALL allows newlines)
+    m = re.search(r"additional\s+lump\s+sum\s+of\s*(?:£\s*)?([\d,]+).*?\s+in\s+(\d{4})", text, flags)
+    if m:
+        out["lump_sum_required"] = int(m.group(1).replace(",", ""))
+        out["retirement_year_lump"] = int(m.group(2))
+        if spans_out is not None:
+            spans_out["lump_sum_required"] = m.group(0)[:300]
+            spans_out["retirement_year_lump"] = m.group(0)[:300]
+    else:
+        my = re.search(r"lump\s+sum.*?in\s+(\d{4})", text, flags)
+        if my:
+            out["retirement_year_lump"] = int(my.group(1))
+            if spans_out is not None:
+                spans_out["retirement_year_lump"] = my.group(0)[:300]
+        idx = text.find("additional lump sum")
+        if idx >= 0:
+            region = text[idx : idx + 300]
+            mm = re.search(r"£\s*([\d,]+)", region)
+            if mm and out["lump_sum_required"] is None:
+                out["lump_sum_required"] = int(mm.group(1).replace(",", ""))
+                if spans_out is not None:
+                    spans_out["lump_sum_required"] = mm.group(0)[:300]
+    # ANNUAL_SAVINGS_REQUIRED (PRE): line-break tolerant — £ can be before or after "per year"
+    # (a) save an additional ... £X ... per year
+    m = re.search(r"save\s+an\s+additional.*?£\s*([\d,]+).*?per\s+year", text, flags)
+    if m:
+        out["annual_savings_required"] = int(m.group(1).replace(",", ""))
+        if spans_out is not None:
+            spans_out["annual_savings_required"] = m.group(0)[:300]
+    if out["annual_savings_required"] is None:
+        # (b) save an additional ... per year ... £X (Voyant often puts £ on next line after "per year")
+        m = re.search(r"save\s+an\s+additional.*?per\s+year.*?£\s*([\d,]+)", text, flags)
+        if m:
+            out["annual_savings_required"] = int(m.group(1).replace(",", ""))
+            if spans_out is not None:
+                spans_out["annual_savings_required"] = m.group(0)[:300]
+    if out["annual_savings_required"] is None:
+        # (c) Option B: first £ amount in window after "save an additional" (250–400 chars)
+        idx = text.lower().find("save an additional")
+        if idx >= 0:
+            window = text[idx : idx + 400]
+            mm = re.search(r"£\s*([\d,]+)", window)
+            if mm:
+                out["annual_savings_required"] = int(mm.group(1).replace(",", ""))
+                if spans_out is not None:
+                    spans_out["annual_savings_required"] = mm.group(0)[:300]
+                    spans_out["annual_savings_required_window"] = window[:400]
+    if out["annual_savings_required"] is None:
+        # "Save an additional £X annually" (compact form)
+        m = re.search(r"Save\s+an\s+additional\s*(?:£\s*)?([\d,]+)\s+annually", text, flags)
+        if m:
+            out["annual_savings_required"] = int(m.group(1).replace(",", ""))
+            if spans_out is not None:
+                spans_out["annual_savings_required"] = m.group(0)[:300]
+    m = re.search(r"Expenses\s+are\s+not\s+funded\s+in\s+(\d+)\s+years", text, flags)
+    if not m:
+        m = re.search(r"Expenses\s+are\s+funded\s+in\s+not\s+(\d+)\s+years", text, flags)
+    if m:
+        out["post_not_funded_years"] = int(m.group(1))
+        if spans_out is not None:
+            spans_out["post_not_funded_years"] = m.group(0)[:300]
+    m = re.search(r"Expenses\s+are\s+funded\s+in\s+(?!not\s)(\d+)\s+years", text, flags)
+    if m:
+        out["post_funded_years"] = int(m.group(1))
+        if spans_out is not None:
+            spans_out["post_funded_years"] = m.group(0)[:300]
+    # POST_RETIREMENT_SPENDING: £value may be on own line after "You can afford to spend"
+    m = re.search(r"You\s+can\s+afford\s+to\s+spend\s*(?:£\s*)?([\d,]+).*?(?:per\s+year|annually)", text, flags)
+    if m:
+        out["post_retirement_spending"] = int(m.group(1).replace(",", ""))
+        if spans_out is not None:
+            spans_out["post_retirement_spending"] = m.group(0)[:300]
+    if out["post_retirement_spending"] is None:
+        idx = text.find("You can afford to spend")
+        if idx >= 0:
+            region = text[idx : idx + 200]
+            mm = re.search(r"£\s*([\d,]+)", region)
+            if mm:
+                out["post_retirement_spending"] = int(mm.group(1).replace(",", ""))
+                if spans_out is not None:
+                    spans_out["post_retirement_spending"] = mm.group(0)[:300]
+    return out
+
+
+def extract_financial_summary_slide14_debug(doc: fitz.Document) -> tuple[dict[str, Optional[int]], dict]:
+    """Extract Slide 14 values and return (values_dict, debug_dict). Debug includes slide14_page, matched_anchor_phrase, page_snippet, matched_spans (exact text matched per field)."""
+    debug = {"slide14_page": None, "matched_anchor_phrase": None, "page_snippet": None, "page_text_length": 0, "matched_spans": {}, "regex_results": []}
+    page_num, matched_anchor, snippet = _find_slide14_page(doc)
+    regex_specs = [
+        ("shortfall in X of Y retirement years", r"shortfall\s+in\s+(\d+)\s+of\s+(\d+)\s+retirement\s+years", ("shortfall_years", "total_retirement_years")),
+        ("lump sum + year (DOTALL)", r"additional\s+lump\s+sum\s+of\s*(?:£\s*)?([\d,]+).*?\s+in\s+(\d{4})", ("lump_sum_required", "retirement_year_lump")),
+        ("save an additional ... £X ... per year (a)", r"save\s+an\s+additional.*?£\s*([\d,]+).*?per\s+year", ("annual_savings_required", None)),
+        ("save an additional ... per year ... £X (b)", r"save\s+an\s+additional.*?per\s+year.*?£\s*([\d,]+)", ("annual_savings_required", None)),
+        ("save an additional ... annually", r"Save\s+an\s+additional\s*(?:£\s*)?([\d,]+)\s+annually", ("annual_savings_required", None)),
+        ("Expenses are not funded in X years", r"Expenses\s+are\s+not\s+funded\s+in\s+(\d+)\s+years", ("post_not_funded_years", None)),
+        ("Expenses are funded in X years", r"Expenses\s+are\s+funded\s+in\s+(?!not\s)(\d+)\s+years", ("post_funded_years", None)),
+        ("You can afford to spend ... (DOTALL)", r"You\s+can\s+afford\s+to\s+spend\s*(?:£\s*)?([\d,]+).*?(?:per\s+year|annually)", ("post_retirement_spending", None)),
+    ]
+    if page_num is None:
+        debug["page_snippet"] = ""
+        for name, pat, _ in regex_specs:
+            debug["regex_results"].append({"name": name, "pattern": pat, "matched": False, "match_text": None, "groups": [], "extracted": {}})
+        return (_extract_financial_summary_slide14(doc, spans_out=debug["matched_spans"]), debug)
+    debug["slide14_page"] = page_num + 1
+    debug["matched_anchor_phrase"] = matched_anchor
+    debug["page_snippet"] = snippet
+    text = get_page_text(doc, page_num)
+    debug["page_text_length"] = len(text)
+    flags_debug = re.IGNORECASE | re.DOTALL
+    values = _extract_financial_summary_slide14(doc, spans_out=debug["matched_spans"])
+    debug["annual_savings_required_extracted"] = values.get("annual_savings_required")
+    for (name, pattern, keys) in regex_specs:
+        m = re.search(pattern, text, flags_debug)
+        if m:
+            groups = list(m.groups())
+            extracted = {}
+            if keys[0]:
+                raw = (groups[0] or "").replace(",", "") if groups else ""
+                if not raw and len(groups) > 1:
+                    raw = (groups[1] or "").replace(",", "")
+                try:
+                    extracted[keys[0]] = int(float(raw)) if raw else None
+                except ValueError:
+                    extracted[keys[0]] = groups[0] or (groups[1] if len(groups) > 1 else None)
+            if keys[1] and len(groups) > 1 and keys[1] != keys[0]:
+                raw = (groups[1] or "").replace(",", "")
+                try:
+                    extracted[keys[1]] = int(float(raw)) if raw else None
+                except ValueError:
+                    extracted[keys[1]] = groups[1]
+            debug["regex_results"].append({"name": name, "pattern": pattern, "matched": True, "match_text": m.group(0)[:200], "groups": groups, "extracted": extracted})
+        else:
+            debug["regex_results"].append({"name": name, "pattern": pattern, "matched": False, "match_text": None, "groups": [], "extracted": {}})
+    return (values, debug)
 
 
 # ---------------------------------------------------------------------------
@@ -513,6 +725,14 @@ def extract_pre_advice(pdf_path: Path, charts_dir: Path) -> tuple[dict, dict]:
         "total_estate_transfer": raw_values.get("estate_transfer"),
         "net_taxable_estate": raw_values.get("net_taxable"),
         "liquid_assets_retirement": raw_values.get("liquid_assets_retirement"),
+        "shortfall_years": raw_values.get("shortfall_years"),
+        "total_retirement_years": raw_values.get("total_retirement_years"),
+        "lump_sum_required": raw_values.get("lump_sum_required"),
+        "retirement_year_lump": raw_values.get("retirement_year_lump"),
+        "annual_savings_required": raw_values.get("annual_savings_required"),
+        "post_not_funded_years": raw_values.get("post_not_funded_years"),
+        "post_funded_years": raw_values.get("post_funded_years"),
+        "post_retirement_spending": raw_values.get("post_retirement_spending"),
     }
     charts = extract_charts_from_pdf(pdf_path, charts_dir, "pre")
     return values, charts
@@ -531,6 +751,14 @@ def extract_post_advice(pdf_path: Path, charts_dir: Path) -> tuple[dict, dict]:
         "total_estate_transfer": raw_values.get("estate_transfer"),
         "net_taxable_estate": raw_values.get("net_taxable"),
         "liquid_assets_retirement": raw_values.get("liquid_assets_retirement"),
+        "shortfall_years": raw_values.get("shortfall_years"),
+        "total_retirement_years": raw_values.get("total_retirement_years"),
+        "lump_sum_required": raw_values.get("lump_sum_required"),
+        "retirement_year_lump": raw_values.get("retirement_year_lump"),
+        "annual_savings_required": raw_values.get("annual_savings_required"),
+        "post_not_funded_years": raw_values.get("post_not_funded_years"),
+        "post_funded_years": raw_values.get("post_funded_years"),
+        "post_retirement_spending": raw_values.get("post_retirement_spending"),
     }
     charts = extract_charts_from_pdf(pdf_path, charts_dir, "post")
 
