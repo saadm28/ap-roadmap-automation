@@ -118,7 +118,8 @@ def extract_values_from_doc(doc: fitz.Document) -> dict[str, Any]:
             continue
         text = get_page_text(doc, page_num)
         result[key] = extract_value_from_text(text, cfg["regex"])
-    # Liquid assets at retirement: from table (Savings + Investments + Pensions) at retirement year, not regex
+    # Liquid assets at retirement: from table (Savings + Investments + Pensions) at retirement year, not regex.
+    # Single code path: same logic used by app (run_extraction) and scripts/test_liquid_assets.py (extract_liquid_assets_debug).
     result["liquid_assets_retirement"] = _extract_liquid_assets_table_total(doc)
     if result["liquid_assets_retirement"] is None:
         liq_debug = extract_liquid_assets_debug(doc)
@@ -354,6 +355,19 @@ def extract_retirement_year(doc: fitz.Document) -> int:
     return DEFAULT_RETIREMENT_YEAR
 
 
+def _get_retirement_year_for_liquid(doc: fitz.Document) -> int:
+    """Prefer retirement year from Retirement Summary (Slide 14) page; else fall back to extract_retirement_year."""
+    page_num, _, _ = _find_slide14_page(doc)
+    if page_num is not None:
+        text = get_page_text(doc, page_num)
+        m = re.search(r"lump\s+sum.*?in\s+(\d{4})", text, re.IGNORECASE | re.DOTALL)
+        if m:
+            y = int(m.group(1))
+            if 2030 <= y <= 2049:
+                return y
+    return extract_retirement_year(doc)
+
+
 # ---------------------------------------------------------------------------
 # Liquid Assets table page: score candidates by year tokens, currency, row labels
 # ---------------------------------------------------------------------------
@@ -413,8 +427,14 @@ def extract_liquid_assets_debug(doc: fitz.Document) -> dict:
         "row_preview": [],
         "header_row_index": None,
         "header_col_index": None,
+        "retirement_year_ordinal": None,
         "year_in_header": None,
         "candidate_years_on_page": None,
+        "block_start": None,
+        "block_end": None,
+        "detected_row_labels": [],
+        "block_rows_scanned": [],
+        "block_first_cells_as_read": [],
         "data_rows_found": [],
         "values_summed": {},
         "total": None,
@@ -426,8 +446,8 @@ def extract_liquid_assets_debug(doc: fitz.Document) -> dict:
             text = get_page_text(doc, i)
             if LIQUID_ASSETS_HEADING in text:
                 debug["liquid_heading_pages"].append(i + 1)  # 1-based for display
-        # Retirement year (used to find column)
-        debug["retirement_year"] = extract_retirement_year(doc)
+        # Retirement year: prefer Retirement Summary (Slide 14), else fallback
+        debug["retirement_year"] = _get_retirement_year_for_liquid(doc)
         # Candidate page scores: why each page was chosen or skipped
         for i in range(len(doc)):
             text = get_page_text(doc, i)
@@ -490,13 +510,16 @@ def extract_liquid_assets_debug(doc: fitz.Document) -> dict:
         debug["row_preview"] = [
             (cells[:4] if len(cells) >= 4 else cells) for _, cells in rows[:20]
         ]  # first 4 cells of first 20 rows
-        # Find year header row that contains retirement year and looks like a row of years (not early 2025-2028)
-        year_str = str(debug["retirement_year"])
-        header_row_index, header_col_index = _find_year_header_row(rows, debug["retirement_year"])
+        # Find year header row and column
+        header_row_index, retirement_col_index = _find_year_header_row(rows, debug["retirement_year"])
         debug["header_row_index"] = header_row_index
-        debug["header_col_index"] = header_col_index
-        debug["year_in_header"] = year_str if header_col_index is not None else None
-        if header_col_index is None or header_row_index is None:
+        debug["header_col_index"] = retirement_col_index
+        # Year ordinal: position of retirement year among 4-digit-year header cells (avoids header token drift)
+        header_cells = rows[header_row_index][1] if header_row_index is not None and header_row_index < len(rows) else []
+        year_ordinal = _get_year_ordinal_from_header_row(header_cells, debug["retirement_year"]) if header_cells else None
+        debug["retirement_year_ordinal"] = year_ordinal
+        debug["year_in_header"] = str(debug["retirement_year"]) if retirement_col_index is not None else None
+        if header_row_index is None or retirement_col_index is None:
             # List candidate years found on the table page (from any cell)
             candidate_years = set()
             for _, cells in rows:
@@ -505,26 +528,24 @@ def extract_liquid_assets_debug(doc: fitz.Document) -> dict:
                         candidate_years.add(int(m))
             debug["candidate_years_on_page"] = sorted(candidate_years) if candidate_years else None
             debug["error"] = (
-                f"Retirement year {year_str} not found in any row. "
+                f"Retirement year {debug['retirement_year']} not found in any row. "
                 f"Candidate years on this page: {debug.get('candidate_years_on_page') or 'none'}. "
                 f"Row starts: {[c[:2] for _, c in rows[:5]]}"
             )
             return debug
-        # Sum only the three rows immediately below year header: Savings, Investments, Pensions
-        total, values_by_label = _sum_liquid_from_three_rows(rows, header_row_index, header_col_index)
+        block_start = header_row_index
+        block_end = _find_block_end(rows, header_row_index)
+        debug["block_start"] = block_start
+        debug["block_end"] = block_end
+        total, values_by_label = _sum_liquid_from_block(
+            rows, header_row_index, retirement_col_index, block_end, debug_out=debug, year_ordinal=year_ordinal
+        )
+        debug["detected_row_labels"] = list(values_by_label.keys())
         debug["values_summed"] = dict(values_by_label)
         debug["data_rows_found"] = [(k, v) for k, v in values_by_label.items()]
-        for offset, expected_label in enumerate(_LIQUID_DATA_ROW_LABELS_ORDER):
-            ri = header_row_index + 2 + offset
-            if ri < len(rows):
-                _, cells = rows[ri]
-                if expected_label not in values_by_label and header_col_index < len(cells):
-                    debug["data_rows_found"].append(
-                        (expected_label, f"cell={cells[header_col_index]!r} (parse failed or label mismatch)")
-                    )
         debug["total"] = total if total else None
         if total == 0:
-            debug["error"] = "No numeric values summed (check row labels and column alignment for the 3 rows under year header)."
+            debug["error"] = "No numeric values summed in block (check first-cell row labels and column alignment)."
     except Exception as e:
         debug["error"] = str(e)
         import traceback
@@ -575,21 +596,38 @@ def _cell_looks_like_year(cell: str) -> bool:
     return bool(s and len(s) == 4 and s.isdigit() and s.startswith("20"))
 
 
+def _get_year_ordinal_from_header_row(cells: list[str], retirement_year: int) -> Optional[int]:
+    """
+    Count only header cells that are 4-digit years; return 0-based position of retirement_year among them.
+    This avoids index drift when header has stray tokens (e.g. "1 2"). Returns None if retirement_year not in year list.
+    """
+    year_str = str(retirement_year)
+    pos = 0
+    for cell in cells:
+        c = (cell or "").strip()
+        if not _cell_looks_like_year(c):
+            continue
+        if c == year_str:
+            return pos
+        pos += 1
+    return None
+
+
 def _find_year_header_row(
     rows: list[tuple[float, list[str]]], retirement_year: int
 ) -> tuple[Optional[int], Optional[int]]:
     """
-    Find the year header row that contains the retirement year and looks like a row of years
-    (e.g. 2034, 2035, ..., 2038, ...). Do not use an early header row (e.g. 2025-2028) when
-    retirement year is 2038. Returns (header_row_index, header_col_index) or (None, None).
+    Find the year header row that contains the retirement year (exact string match in a cell).
+    Column index is determined by: for idx, cell in enumerate(header_row): if cell.strip() == str(retirement_year): column = idx.
+    Do not assume consistent column index across PDFs. Returns (header_row_index, retirement_col_index) or (None, None).
     """
     year_str = str(retirement_year)
     candidates = []  # (row_index, col_index, year_like_cell_count)
     for ri, (_, cells) in enumerate(rows):
         col_index = None
-        for col, cell in enumerate(cells):
-            if cell == year_str or cell.replace(",", "").strip() == year_str:
-                col_index = col
+        for idx, cell in enumerate(cells):
+            if (cell or "").strip() == year_str:
+                col_index = idx
                 break
         if col_index is None:
             continue
@@ -597,61 +635,106 @@ def _find_year_header_row(
         candidates.append((ri, col_index, year_like_count))
     if not candidates:
         return None, None
-    # Prefer the row with the most year-like cells (real year header has many years; early row has fewer)
     candidates.sort(key=lambda x: (-x[2], x[0]))
     return candidates[0][0], candidates[0][1]
 
 
-# Expected order of the three data rows immediately under the year header (row+2, row+3, row+4 in 1-based = indices +1, +2, +3)
-_LIQUID_DATA_ROW_LABELS_ORDER = ("Savings", "Investments", "Pensions")
+# Expected row labels in Liquid Assets block (order may vary; we detect dynamically via startswith)
+LIQUID_ROW_LABELS = frozenset({"Savings", "Investments", "Pensions"})
 
 
-def _sum_liquid_from_three_rows(
+def _liquid_row_label_from_first_cell(first_cell: str) -> Optional[str]:
+    """Normalized match: first_cell.strip().lower() startswith savings/investments/pensions. Returns canonical label or None."""
+    row_label = (first_cell or "").strip().lower()
+    if not row_label:
+        return None
+    if row_label.startswith("savings"):
+        return "Savings"
+    if row_label.startswith("investments"):
+        return "Investments"
+    if row_label.startswith("pensions"):
+        return "Pensions"
+    return None
+
+
+def _find_block_end(rows: list[tuple[float, list[str]]], header_row_index: int) -> int:
+    """
+    Block starts at header_row_index. Block ends at the next row whose first cell is a 4-digit year, or end of table.
+    Returns the exclusive end index (first row index not in this block).
+    """
+    for ri in range(header_row_index + 1, len(rows)):
+        _, cells = rows[ri]
+        if not cells:
+            continue
+        first_cell = (cells[0] or "").strip()
+        if _cell_looks_like_year(first_cell):
+            return ri
+    return len(rows)
+
+
+def _sum_liquid_from_block(
     rows: list[tuple[float, list[str]]],
     header_row_index: int,
-    header_col_index: int,
+    retirement_col_index: int,
+    block_end: int,
+    debug_out: Optional[dict] = None,
+    year_ordinal: Optional[int] = None,
 ) -> tuple[int, dict[str, int]]:
     """
-    Sum values only from the three rows that contain Savings, Investments, Pensions.
-    These are the 2nd, 3rd, 4th rows after the year header (row+2, row+3, row+4 in 1-based;
-    often row+1 is "Age : Joe | Jane"). So we use header_row_index+2, +3, +4.
-    Returns (total, values_by_label). If a row is missing or value unparseable, that label is skipped.
+    Scan rows from header_row_index+1 until block_end (exclusive). Detect rows by first cell using
+    normalized startswith(savings|investments|pensions). Column for retirement year: if year_ordinal
+    is set, use 1 + year_ordinal (position among year columns); else use retirement_col_index. If
+    effective column >= len(row), cap to len(row)-1 and log warning. debug_out: optional dict to add
+    block_rows_scanned, block_first_cells_as_read.
     """
     total = 0
     values_by_label = {}
-    for offset, expected_label in enumerate(_LIQUID_DATA_ROW_LABELS_ORDER):
-        ri = header_row_index + 2 + offset  # +2,+3,+4: skip first row after year header (e.g. Age)
+    block_rows_scanned = []
+    first_cells_as_read = []
+    for ri in range(header_row_index + 1, block_end):
         if ri >= len(rows):
             break
         _, cells = rows[ri]
-        if header_col_index >= len(cells):
+        first_cell_raw = (cells[0] if cells else "")
+        first_cells_as_read.append(first_cell_raw)
+        canonical_label = _liquid_row_label_from_first_cell(first_cell_raw)
+        if canonical_label is None:
+            if debug_out is not None:
+                block_rows_scanned.append((ri, first_cell_raw, list(cells) if cells else []))
             continue
-        label = None
-        for c in cells:
-            if c.strip() in LIQUID_TABLE_ROW_LABELS:
-                label = c.strip()
-                break
-        if label is None or label != expected_label:
-            continue
-        val = _parse_int_from_cell(cells[header_col_index])
+        if year_ordinal is not None:
+            effective_col = 1 + year_ordinal
+        else:
+            effective_col = retirement_col_index
+        if effective_col >= len(cells):
+            logger.warning(
+                "Liquid assets: retirement column index %s >= len(row)=%s, capping to len(row)-1=%s; row=%s",
+                effective_col, len(cells), len(cells) - 1, cells,
+            )
+            effective_col = len(cells) - 1
+        val = _parse_int_from_cell(cells[effective_col])
         if val is not None:
             total += val
-            values_by_label[label] = val
+            values_by_label[canonical_label] = val
+        if debug_out is not None:
+            block_rows_scanned.append((ri, first_cell_raw, list(cells) if cells else []))
+    if debug_out is not None:
+        debug_out["block_rows_scanned"] = block_rows_scanned
+        debug_out["block_first_cells_as_read"] = first_cells_as_read
     return total, values_by_label
 
 
 def _extract_liquid_assets_table_total(doc: fitz.Document) -> Optional[int]:
     """
-    Find Liquid Assets table page by heading; parse table with get_text('dict').
-    Identify the year header row that contains the retirement year (e.g. 2038) and looks like
-    a row of years; sum only Savings + Investments + Pensions from the three rows immediately
-    below that header. Ignore all other blocks on the page.
+    Find Liquid Assets table page; get retirement year from Retirement Summary when possible.
+    Identify header row and column for that year; define block (until next year row or end);
+    within block only, detect Savings/Investments/Pensions by first cell and sum values at retirement column.
     """
     page_num = find_liquid_assets_table_page(doc)
     if page_num is None:
         return None
     page = doc[page_num]
-    retirement_year = extract_retirement_year(doc)
+    retirement_year = _get_retirement_year_for_liquid(doc)
     try:
         raw = page.get_text("dict")
     except Exception:
@@ -677,10 +760,32 @@ def _extract_liquid_assets_table_total(doc: fitz.Document) -> Optional[int]:
                 rows.append((y_avg, [t for _, t in cells]))
     rows.sort(key=lambda r: r[0])
     rows = _merge_rows_by_y(rows)
-    header_row_index, header_col_index = _find_year_header_row(rows, retirement_year)
-    if header_row_index is None or header_col_index is None:
+    header_row_index, retirement_col_index = _find_year_header_row(rows, retirement_year)
+    if header_row_index is None or retirement_col_index is None:
+        logger.info(
+            "Liquid assets: retirement_year=%s, header_row_index=%s, retirement_column_index=%s (not found)",
+            retirement_year, header_row_index, retirement_col_index,
+        )
         return None
-    total, _ = _sum_liquid_from_three_rows(rows, header_row_index, header_col_index)
+    header_cells = rows[header_row_index][1] if header_row_index < len(rows) else []
+    year_ordinal = _get_year_ordinal_from_header_row(header_cells, retirement_year) if header_cells else None
+    block_start = header_row_index
+    block_end = _find_block_end(rows, header_row_index)
+    liquid_debug = {}
+    total, values_by_label = _sum_liquid_from_block(
+        rows, header_row_index, retirement_col_index, block_end, debug_out=liquid_debug, year_ordinal=year_ordinal
+    )
+    detected_row_labels = list(values_by_label.keys())
+    logger.info(
+        "Liquid assets: retirement_year=%s, header_row_index=%s, retirement_column_index=%s, "
+        "block_start=%s, block_end=%s, detected_row_labels=%s, extracted_values=%s, final_sum=%s",
+        retirement_year, header_row_index, retirement_col_index,
+        block_start, block_end, detected_row_labels, values_by_label, total,
+    )
+    if liquid_debug.get("block_rows_scanned"):
+        logger.debug("Liquid assets block_rows_scanned: %s", liquid_debug.get("block_rows_scanned"))
+    if liquid_debug.get("block_first_cells_as_read"):
+        logger.debug("Liquid assets block_first_cells_as_read: %s", liquid_debug.get("block_first_cells_as_read"))
     return total if total else None
 
 
