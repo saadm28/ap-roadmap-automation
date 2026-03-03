@@ -5,8 +5,9 @@ Values: regex on anchor pages; liquid assets at retirement from table (Savings +
 """
 
 import re
+import logging
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Any
 
 import fitz  # PyMuPDF
 from PIL import Image
@@ -20,6 +21,8 @@ from config import (
     SLIDE24_ESTATE_ANALYSIS_CROP,
     SLIDE24_ESTATE_ANALYSIS_FILENAME,
 )
+
+logger = logging.getLogger(__name__)
 
 # Default retirement year when not found in report (e.g. sample docs use 2038)
 DEFAULT_RETIREMENT_YEAR = 2038
@@ -105,8 +108,8 @@ def extract_value_from_text(text: str, pattern: str) -> Optional[int]:
         return None
 
 
-def extract_values_from_doc(doc: fitz.Document) -> dict[str, Optional[int]]:
-    """For each value type: find page by anchors, get page text, run regex. Returns dict of value key -> int or None."""
+def extract_values_from_doc(doc: fitz.Document) -> dict[str, Any]:
+    """Extract all values from doc. Returns dict with int/str/None values (numeric keys + client_name, report_date, report_month, report_year from first page)."""
     result = {}
     for key, cfg in VALUE_EXTRACTORS.items():
         page_num = find_page_by_anchors(doc, cfg["anchors"])
@@ -117,9 +120,49 @@ def extract_values_from_doc(doc: fitz.Document) -> dict[str, Optional[int]]:
         result[key] = extract_value_from_text(text, cfg["regex"])
     # Liquid assets at retirement: from table (Savings + Investments + Pensions) at retirement year, not regex
     result["liquid_assets_retirement"] = _extract_liquid_assets_table_total(doc)
-    # Slide 14: Retirement Summary / shortfall / funding page (anchor phrase search, not "Financial Summary" intro)
+    if result["liquid_assets_retirement"] is None:
+        liq_debug = extract_liquid_assets_debug(doc)
+        logger.warning(
+            "Liquid assets not extracted. retirement_year=%s, table_page=%s, pages_with_heading=%s, error=%s",
+            liq_debug.get("retirement_year"),
+            liq_debug.get("table_page_found"),
+            liq_debug.get("liquid_heading_pages"),
+            liq_debug.get("error"),
+        )
+    # Slide 14: Retirement Summary / shortfall / funding page
     result.update(_extract_financial_summary_slide14(doc))
+    # First page: client name and report date (for {{CLIENT_NAME}}, {{REPORT_MONTH}}, {{REPORT_YEAR}})
+    result.update(_extract_first_page_meta(doc))
     return result
+
+
+def _extract_first_page_meta(doc: fitz.Document) -> dict[str, Optional[str]]:
+    """Extract client name and report date from first page. Returns client_name, report_date, report_month, report_year."""
+    out = {"client_name": None, "report_date": None, "report_month": None, "report_year": None}
+    if len(doc) == 0:
+        return out
+    text = get_page_text(doc, 0)
+    # Client name: line after "Financial Plan for"
+    m = re.search(r"Financial\s+Plan\s+for\s*[\r\n]+\s*([^\r\n]+)", text, re.IGNORECASE)
+    if m:
+        out["client_name"] = m.group(1).strip()
+    # Date: after "Prepared:" in DD/MM/YYYY format
+    m = re.search(r"Prepared:\s*[\r\n]*(\d{1,2}/\d{1,2}/\d{4})", text, re.IGNORECASE)
+    if m:
+        date_str = m.group(1).strip()
+        out["report_date"] = date_str
+        parts = date_str.split("/")
+        if len(parts) == 3:
+            try:
+                day, month, year = int(parts[0]), int(parts[1]), int(parts[2])
+                if 1 <= month <= 12 and year > 1900:
+                    _MONTH_NAMES = ["", "January", "February", "March", "April", "May", "June",
+                                    "July", "August", "September", "October", "November", "December"]
+                    out["report_month"] = _MONTH_NAMES[month]
+                    out["report_year"] = str(year)
+            except ValueError:
+                pass
+    return out
 
 
 def _extract_financial_summary_slide14(doc: fitz.Document, spans_out: Optional[dict[str, str]] = None) -> dict[str, Optional[int]]:
@@ -355,12 +398,13 @@ def find_liquid_assets_table_page(doc: fitz.Document) -> Optional[int]:
 
 def extract_liquid_assets_debug(doc: fitz.Document) -> dict:
     """
-    Run liquid assets table extraction and return (total, debug_info).
-    Debug info includes: which pages have heading/rows, retirement year, parsed rows, header column, values summed.
+    Run liquid assets table extraction and return debug_info dict.
+    Debug includes: pages with heading, page scores (why chosen/skipped), retirement year, parsed rows, header column, values summed, error if any.
     """
     debug = {
         "retirement_year": None,
         "liquid_heading_pages": [],
+        "candidate_page_scores": [],
         "table_page_found": None,
         "savings_found_on_table_page": None,
         "investments_found_on_table_page": None,
@@ -382,15 +426,31 @@ def extract_liquid_assets_debug(doc: fitz.Document) -> dict:
             text = get_page_text(doc, i)
             if LIQUID_ASSETS_HEADING in text:
                 debug["liquid_heading_pages"].append(i + 1)  # 1-based for display
-        # Retirement year
+        # Retirement year (used to find column)
         debug["retirement_year"] = extract_retirement_year(doc)
-        # Table page
+        # Candidate page scores: why each page was chosen or skipped
+        for i in range(len(doc)):
+            text = get_page_text(doc, i)
+            if LIQUID_ASSETS_HEADING not in text:
+                continue
+            year_count, currency_count, label_bonus, has_all_labels = _score_liquid_assets_page(text)
+            score = year_count * 10 + currency_count + label_bonus if (year_count >= 1 and currency_count >= 1) else None
+            debug["candidate_page_scores"].append({
+                "page": i + 1,
+                "year_count": year_count,
+                "currency_count": currency_count,
+                "label_bonus": label_bonus,
+                "has_all_labels": has_all_labels,
+                "score": score,
+                "included": score is not None,
+            })
+        # Table page (same logic as find_liquid_assets_table_page)
         page_num = find_liquid_assets_table_page(doc)
         debug["table_page_found"] = (page_num + 1) if page_num is not None else None
         if page_num is None:
             debug["error"] = (
                 "No Liquid Assets page had both year headers (e.g. 2038) and £ values. "
-                "Intro/chart-only pages were skipped. Check that the numeric table is on a page with 'Liquid Assets'."
+                "Intro/chart-only pages were skipped. Check candidate_page_scores to see why each page was excluded."
             )
             return debug
         page = doc[page_num]
@@ -703,8 +763,8 @@ def extract_charts_from_pdf(
 # Extract values for one PDF (pre or post): 4 value types from anchor pages
 # ---------------------------------------------------------------------------
 
-def extract_values_from_pdf(pdf_path: Path) -> dict[str, Optional[int]]:
-    """Returns dict with keys retirement_spending, estate_tax, estate_transfer, net_taxable (values as int or None)."""
+def extract_values_from_pdf(pdf_path: Path) -> dict[str, Any]:
+    """Returns dict with all extracted values (int/str/None)."""
     doc = fitz.open(pdf_path)
     try:
         return extract_values_from_doc(doc)
@@ -733,6 +793,10 @@ def extract_pre_advice(pdf_path: Path, charts_dir: Path) -> tuple[dict, dict]:
         "post_not_funded_years": raw_values.get("post_not_funded_years"),
         "post_funded_years": raw_values.get("post_funded_years"),
         "post_retirement_spending": raw_values.get("post_retirement_spending"),
+        "client_name": raw_values.get("client_name"),
+        "report_date": raw_values.get("report_date"),
+        "report_month": raw_values.get("report_month"),
+        "report_year": raw_values.get("report_year"),
     }
     charts = extract_charts_from_pdf(pdf_path, charts_dir, "pre")
     return values, charts
@@ -759,6 +823,10 @@ def extract_post_advice(pdf_path: Path, charts_dir: Path) -> tuple[dict, dict]:
         "post_not_funded_years": raw_values.get("post_not_funded_years"),
         "post_funded_years": raw_values.get("post_funded_years"),
         "post_retirement_spending": raw_values.get("post_retirement_spending"),
+        "client_name": raw_values.get("client_name"),
+        "report_date": raw_values.get("report_date"),
+        "report_month": raw_values.get("report_month"),
+        "report_year": raw_values.get("report_year"),
     }
     charts = extract_charts_from_pdf(pdf_path, charts_dir, "post")
 

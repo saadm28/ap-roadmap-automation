@@ -95,6 +95,9 @@ def _render_results(output_dir: Path, pre_values: dict, post_values: dict, all_c
     st.caption("Review extracted values and charts below.")
 
     st.subheader("Extracted values")
+    client_name = pre_values.get("client_name") or "—"
+    report_date = pre_values.get("report_date") or "—"
+    st.markdown(f"**Client:** {client_name}  \n**Report date:** {report_date}")
     st.markdown("**Pre-Advice**")
     st.dataframe(
         [
@@ -354,6 +357,9 @@ if generate:
                     post_funded_years=post_values.get("post_funded_years"),
                     post_retirement_spending=post_values.get("post_retirement_spending"),
                     template_type=template_type,
+                    client_name=pre_values.get("client_name"),
+                    report_month=pre_values.get("report_month"),
+                    report_year=pre_values.get("report_year"),
                 )
             except Exception as e:
                 st.exception(e)

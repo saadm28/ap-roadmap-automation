@@ -167,6 +167,9 @@ def populate_roadmap_pptx(
     post_funded_years: Optional[int] = None,
     post_retirement_spending: Optional[int] = None,
     template_type: str = "Generic",
+    client_name: Optional[str] = None,
+    report_month: Optional[str] = None,
+    report_year: Optional[str] = None,
 ) -> None:
     """
     Replace all placeholders in the deck by name. No slide numbers — every occurrence
@@ -190,6 +193,9 @@ def populate_roadmap_pptx(
         pre_funded_years = total_retirement_years - shortfall_years
 
     all_tokens = {
+        "{{CLIENT_NAME}}": (client_name or "—").strip(),
+        "{{REPORT_MONTH}}": report_month or "—",
+        "{{REPORT_YEAR}}": report_year or "—",
         "{{RETIREMENT_MONTHLY_DIFF}}": f"£{retirement_monthly_diff:,}",
         "{{RETIREMENT_ANNUAL_DIFF}}": f"£{retirement_annual_diff:,}",
         "{{LIQUID_ASSETS_PRE}}": _fmt_liquid_millions(liquid_pre),
