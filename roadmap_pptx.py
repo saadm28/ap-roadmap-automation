@@ -1,34 +1,22 @@
 """
-Populate the generic RoadMap template with extracted charts and values.
-Uses shape names (Selection Pane names) to find placeholders. Slide numbers are 1-based in spec, 0-based in code.
+Populate the RoadMap template with extracted charts and values.
+Uses placeholder names only: text tokens (e.g. {{LIQUID_ASSETS_PRE}}) and shape names (Selection Pane).
+No slide numbers — replacements run across the whole deck so content can be moved or duplicated.
 """
 
 import logging
 from pathlib import Path
 from typing import Optional, Tuple, Any
 
+from PIL import Image
 from pptx import Presentation
 from pptx.enum.shapes import MSO_SHAPE_TYPE
 
 logger = logging.getLogger(__name__)
 
 
-# Slide index (0-based) for each target slide (Generic template)
-SLIDE_6 = 5
-SLIDE_8 = 7
-SLIDE_9 = 8
-SLIDE_12 = 11
-SLIDE_13 = 12
-SLIDE_14 = 13
-SLIDE_19 = 18   # Generic: comparison charts
-SLIDE_24 = 23   # Generic: post estate
-# Lawyers template: comparison charts = Slide 22 (index 21), post estate = Slide 27 (index 26)
-SLIDE_22_LAWYERS = 21
-SLIDE_27_LAWYERS = 26
-
-
 def _fmt_liquid_millions(value: Optional[int]) -> str:
-    """Format liquid total (in £) as c.£Xm for Slide 6. One decimal if needed; no trailing .0 if whole."""
+    """Format liquid total (in £) as c.£Xm. One decimal if needed; no trailing .0 if whole."""
     if value is None:
         return "—"
     millions = value / 1_000_000
@@ -38,7 +26,7 @@ def _fmt_liquid_millions(value: Optional[int]) -> str:
 
 
 def _fmt_gbp(value: Optional[int]) -> str:
-    """Format int as £ with commas for Slide 14 (and similar)."""
+    """Format int as £ with commas."""
     if value is None:
         return "—"
     return f"£{value:,}"
@@ -60,12 +48,6 @@ def _get_slide_text(slide) -> str:
     return "".join(collect(slide.shapes))
 
 
-def _check_slide6_placeholders(slide, token_names: list[str]) -> list[str]:
-    """If any placeholder token still appears in the slide text, return list of missing names."""
-    text = _get_slide_text(slide)
-    return [name for name in token_names if name in text]
-
-
 def _find_shape_by_name(slide, name: str) -> Tuple[Optional[Any], int, int]:
     """
     Find a shape by name on the slide, including inside groups.
@@ -84,13 +66,41 @@ def _find_shape_by_name(slide, name: str) -> Tuple[Optional[Any], int, int]:
 
 
 def _replace_shape_with_image(slide, shape_name: str, image_path: Path) -> bool:
+    """
+    Replace the first shape with the given name with the image. Uses scale-to-fit so the
+    image keeps its aspect ratio and is not stretched; optionally avoids upscaling so charts stay sharp.
+    Returns True if replaced.
+    """
     shape, abs_left, abs_top = _find_shape_by_name(slide, shape_name)
     if shape is None or not image_path.exists():
         return False
-    width, height = shape.width, shape.height
+    box_w = shape.width
+    box_h = shape.height
     sp = shape._element.getparent()
     sp.remove(shape._element)
-    slide.shapes.add_picture(str(image_path), abs_left, abs_top, width, height)
+
+    # Get image size in pixels to preserve aspect ratio and avoid stretching
+    try:
+        with Image.open(image_path) as img:
+            img_w_px, img_h_px = img.size
+    except Exception:
+        img_w_px = img_h_px = None
+
+    if img_w_px and img_h_px and img_w_px > 0 and img_h_px > 0:
+        # Scale to fit inside placeholder (EMU per pixel). python-pptx uses EMU; 1 inch = 914400 EMU.
+        scale_emu_per_px = min(box_w / img_w_px, box_h / img_h_px)
+        # Cap so we never upscale beyond ~96 DPI equivalent (keeps charts sharp)
+        emu_per_px_96dpi = 914400 / 96
+        scale_emu_per_px = min(scale_emu_per_px, emu_per_px_96dpi)
+        new_width = int(img_w_px * scale_emu_per_px)
+        new_height = int(img_h_px * scale_emu_per_px)
+        # Center image in the placeholder box
+        left = abs_left + (box_w - new_width) // 2
+        top = abs_top + (box_h - new_height) // 2
+        slide.shapes.add_picture(str(image_path), left, top, new_width, new_height)
+    else:
+        # Fallback: use placeholder dimensions if we couldn't read image size
+        slide.shapes.add_picture(str(image_path), abs_left, abs_top, box_w, box_h)
     return True
 
 
@@ -118,11 +128,25 @@ def _replace_text_tokens_in_shapes(shapes, tokens: dict[str, str]) -> None:
 
 
 def _replace_text_tokens(slide, tokens: dict[str, str]) -> None:
-    """
-    Replace placeholder tokens with values in all text on the slide (including inside groups).
-    Works at paragraph level so placeholders split across multiple runs are still replaced.
-    """
+    """Replace placeholder tokens with values in all text on the slide (including inside groups)."""
     _replace_text_tokens_in_shapes(slide.shapes, tokens)
+
+
+# Shape name -> chart key in all_charts. Every occurrence of each shape name in the deck is replaced.
+IMAGE_PLACEHOLDERS = [
+    ("[TIMELINE_IMAGE]", "pre_timeline"),
+    ("PRE_CASHFLOW_IMAGE", "pre_cashflow"),
+    ("PRE_LIQUID_IMAGE", "pre_liquid_assets"),
+    ("PRE_CASHFLOW_COMPARISON", "pre_cashflow"),
+    ("POST_CASHFLOW_COMPARISON", "post_cashflow"),
+    ("PRE_LIQUID_COMPARISON", "pre_liquid_assets"),
+    ("POST_LIQUID_COMPARISON", "post_liquid_assets"),
+    ("COMP_CHART_1", "slide19_comparison_chart_1"),
+    ("COMP_CHART_2", "slide19_comparison_chart_2"),
+    ("COMP_CHART_3", "slide19_comparison_chart_3"),
+    ("COMP_CHART_4", "slide19_comparison_chart_4"),
+    ("POST_ESTATE_IMAGE", "slide24_estate_analysis"),
+]
 
 
 def populate_roadmap_pptx(
@@ -145,12 +169,13 @@ def populate_roadmap_pptx(
     template_type: str = "Generic",
 ) -> None:
     """
+    Replace all placeholders in the deck by name. No slide numbers — every occurrence
+    of each text token or shape name is replaced, so content can appear anywhere or be duplicated.
+
     charts_dir is the charts folder (output_dir / "charts").
-    all_charts maps key -> relative path e.g. "charts/pre_timeline_page4.png"; base is output_dir so full path = charts_dir.parent / rel_path.
-    template_type: "Generic" (Slide 19 = comparison, Slide 24 = estate) or "Lawyers" (Slide 22 = comparison, Slide 27 = estate).
+    all_charts maps key -> relative path e.g. "charts/pre_timeline_page4.png".
+    template_type is kept for API compatibility but no longer affects slide indices.
     """
-    slide_comparison = SLIDE_22_LAWYERS if template_type == "Lawyers" else SLIDE_19
-    slide_estate = SLIDE_27_LAWYERS if template_type == "Lawyers" else SLIDE_24
     prs = Presentation(str(template_path))
     base_dir = charts_dir.parent
 
@@ -159,95 +184,46 @@ def populate_roadmap_pptx(
             return None
         return base_dir / all_charts[key]
 
-    # Slide 6 – Financial Implications (text replacement by placeholder name)
-    # Retirement: pre/post from "You can afford to spend £X annually…"; diffs formatted as £ per month / per year.
-    # Liquid: from Liquid Assets table total at retirement year; format c.£Xm / c.£Ym.
-    if len(prs.slides) > SLIDE_6:
-        slide = prs.slides[SLIDE_6]
-        tokens = {
-            "{{RETIREMENT_MONTHLY_DIFF}}": f"£{retirement_monthly_diff:,}",
-            "{{RETIREMENT_ANNUAL_DIFF}}": f"£{retirement_annual_diff:,}",
-            "{{LIQUID_ASSETS_PRE}}": _fmt_liquid_millions(liquid_pre),
-            "{{LIQUID_ASSETS_POST}}": _fmt_liquid_millions(liquid_post),
-        }
-        _replace_text_tokens(slide, tokens)
-        missing = _check_slide6_placeholders(slide, list(tokens.keys()))
-        if missing:
-            logger.error(
-                "Slide 6 — placeholder shape(s) not found or not replaced: %s",
-                ", ".join(missing),
-            )
+    # ---- All text tokens — replace on every slide (so e.g. Slide 6 figures can appear elsewhere too) ----
+    pre_funded_years: Optional[int] = None
+    if total_retirement_years is not None and shortfall_years is not None:
+        pre_funded_years = total_retirement_years - shortfall_years
 
-    # Slide 8 – timeline (use pre_timeline)
-    if len(prs.slides) > SLIDE_8:
-        path = chart_path("pre_timeline")
-        if path:
-            _replace_shape_with_image(prs.slides[SLIDE_8], "[TIMELINE_IMAGE]", path)
+    all_tokens = {
+        "{{RETIREMENT_MONTHLY_DIFF}}": f"£{retirement_monthly_diff:,}",
+        "{{RETIREMENT_ANNUAL_DIFF}}": f"£{retirement_annual_diff:,}",
+        "{{LIQUID_ASSETS_PRE}}": _fmt_liquid_millions(liquid_pre),
+        "{{LIQUID_ASSETS_POST}}": _fmt_liquid_millions(liquid_post),
+        "{{SHORTFALL_YEARS}}": str(shortfall_years) if shortfall_years is not None else "—",
+        "{{TOTAL_RETIREMENT_YEARS}}": str(total_retirement_years) if total_retirement_years is not None else "—",
+        "{{PRE_FUNDED_YEARS}}": str(pre_funded_years) if pre_funded_years is not None else "—",
+        "{{LUMP_SUM_REQUIRED}}": _fmt_gbp(lump_sum_required),
+        "{{RETIREMENT_YEAR}}": str(retirement_year) if retirement_year is not None else "—",
+        "{{ANNUAL_SAVINGS_REQUIRED}}": _fmt_gbp(annual_savings_required),
+        "{{POST_NOT_FUNDED_YEARS}}": str(post_not_funded_years) if post_not_funded_years is not None else "—",
+        "{{POST_FUNDED_YEARS}}": str(post_funded_years) if post_funded_years is not None else "—",
+        "{{POST_RETIREMENT_SPENDING}}": _fmt_gbp(post_retirement_spending),
+    }
 
-    # Slide 9 – pre cashflow (top) + pre liquid (bottom)
-    # Placeholder names in template Selection Pane: PRE_CASHFLOW_IMAGE = top, PRE_LIQUID_IMAGE = bottom
-    if len(prs.slides) > SLIDE_9:
-        s9 = prs.slides[SLIDE_9]
-        p = chart_path("pre_cashflow")
-        if p:
-            _replace_shape_with_image(s9, "PRE_CASHFLOW_IMAGE", p)
-        p = chart_path("pre_liquid_assets")
-        if p:
-            _replace_shape_with_image(s9, "PRE_LIQUID_IMAGE", p)
+    for slide in prs.slides:
+        _replace_text_tokens(slide, all_tokens)
 
-    # Slide 12 – cashflow pre vs post
-    if len(prs.slides) > SLIDE_12:
-        s12 = prs.slides[SLIDE_12]
-        p = chart_path("pre_cashflow")
-        if p:
-            _replace_shape_with_image(s12, "PRE_CASHFLOW_COMPARISON", p)
-        p = chart_path("post_cashflow")
-        if p:
-            _replace_shape_with_image(s12, "POST_CASHFLOW_COMPARISON", p)
+    # Warn if any placeholder token is still present (e.g. typo in template)
+    full_text = "".join(_get_slide_text(s) for s in prs.slides)
+    still_present = [t for t in all_tokens if t in full_text]
+    if still_present:
+        logger.warning(
+            "Placeholder token(s) still present in deck (not found or not replaced): %s",
+            ", ".join(still_present),
+        )
 
-    # Slide 13 – liquid pre vs post
-    if len(prs.slides) > SLIDE_13:
-        s13 = prs.slides[SLIDE_13]
-        p = chart_path("pre_liquid_assets")
-        if p:
-            _replace_shape_with_image(s13, "PRE_LIQUID_COMPARISON", p)
-        p = chart_path("post_liquid_assets")
-        if p:
-            _replace_shape_with_image(s13, "POST_LIQUID_COMPARISON", p)
-
-    # Slide 14 – Financial Summary (from pre + post PDFs; replace placeholders in existing text)
-    if len(prs.slides) > SLIDE_14:
-        slide14 = prs.slides[SLIDE_14]
-        pre_funded_years: Optional[int] = None
-        if total_retirement_years is not None and shortfall_years is not None:
-            pre_funded_years = total_retirement_years - shortfall_years
-        tokens_14 = {
-            "{{SHORTFALL_YEARS}}": str(shortfall_years) if shortfall_years is not None else "—",
-            "{{TOTAL_RETIREMENT_YEARS}}": str(total_retirement_years) if total_retirement_years is not None else "—",
-            "{{PRE_FUNDED_YEARS}}": str(pre_funded_years) if pre_funded_years is not None else "—",
-            "{{LUMP_SUM_REQUIRED}}": _fmt_gbp(lump_sum_required),
-            "{{RETIREMENT_YEAR}}": str(retirement_year) if retirement_year is not None else "—",
-            "{{ANNUAL_SAVINGS_REQUIRED}}": _fmt_gbp(annual_savings_required),
-            "{{POST_NOT_FUNDED_YEARS}}": str(post_not_funded_years) if post_not_funded_years is not None else "—",
-            "{{POST_FUNDED_YEARS}}": str(post_funded_years) if post_funded_years is not None else "—",
-            "{{POST_RETIREMENT_SPENDING}}": _fmt_gbp(post_retirement_spending),
-        }
-        _replace_text_tokens(slide14, tokens_14)
-
-    # Slide 19 (Generic) / Slide 22 (Lawyers) – comparison charts 1..4
-    if len(prs.slides) > slide_comparison:
-        s_comp = prs.slides[slide_comparison]
-        for i in range(1, 5):
-            key = f"slide19_comparison_chart_{i}"
-            path = chart_path(key)
-            if path and path.exists():
-                _replace_shape_with_image(s_comp, f"COMP_CHART_{i}", path)
-            # else leave placeholder as-is
-
-    # Slide 24 (Generic) / Slide 27 (Lawyers) – post estate
-    if len(prs.slides) > slide_estate:
-        path = chart_path("slide24_estate_analysis")
-        if path:
-            _replace_shape_with_image(prs.slides[slide_estate], "POST_ESTATE_IMAGE", path)
+    # ---- Image placeholders — replace every occurrence of each shape name across all slides ----
+    for shape_name, chart_key in IMAGE_PLACEHOLDERS:
+        path = chart_path(chart_key)
+        if not path or not path.exists():
+            continue
+        for slide in prs.slides:
+            while _replace_shape_with_image(slide, shape_name, path):
+                pass
 
     prs.save(str(output_path))
