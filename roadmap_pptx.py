@@ -123,7 +123,11 @@ def _replace_text_tokens_in_shapes(shapes, tokens: dict[str, str]) -> None:
                 run_text = run.text.strip()
                 for token, value in tokens.items():
                     if run_text == token:
-                        run.text = value
+                        # Preserve leading/trailing spaces so we don't jumble surrounding text
+                        original = run.text
+                        leading = original[: len(original) - len(original.lstrip())]
+                        trailing = original[len(original.rstrip()) :]
+                        run.text = leading + value + trailing
                         break
 
             # Pass 2: replace any remaining tokens in paragraph text (merge into first run)
