@@ -32,6 +32,16 @@ _tmp_*.pdf
 *.zip
 test_estate_slide24_*.png
 
+# Client and test assets (do not push to repo)
+Client Docs/
+client_documents/
+Example Roadmaps/
+exampleroadmaps/
+New Test Files/
+v1 output roadmaps/
+v1/
+Scripts/
+
 # Streamlit (keep .streamlit/config.toml in repo; ignore secrets)
 .streamlit/secrets.toml
 
@@ -47,7 +57,3 @@ Thumbs.db
 .env
 .env.local
 *.pem
-
-
-# client docs
-client_documents
