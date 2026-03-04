@@ -213,7 +213,7 @@ def _render_results(output_dir: Path, pre_values: dict, post_values: dict, all_c
 
 st.set_page_config(
     page_title="AP Partners — RoadMap Generator",
-    page_icon="📊",
+    page_icon=str(Path(__file__).resolve().parent / "favicon.png") if (Path(__file__).resolve().parent / "favicon.png").exists() else "📋",
     layout="centered",
     initial_sidebar_state="collapsed",
 )

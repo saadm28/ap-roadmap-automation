@@ -105,7 +105,12 @@ def _replace_shape_with_image(slide, shape_name: str, image_path: Path) -> bool:
 
 
 def _replace_text_tokens_in_shapes(shapes, tokens: dict[str, str]) -> None:
-    """Replace tokens in all text in shapes (and recurse into groups)."""
+    """
+    Replace placeholder tokens with values. Two passes so formatting is preserved:
+    1) Run-level: if a run's text is exactly a token, replace only that run's text (keeps bold/etc).
+    2) Paragraph-level: any remaining tokens (e.g. embedded in longer text) are replaced by merging
+       into the first run (existing behavior).
+    """
     for shape in shapes:
         if getattr(shape, "shape_type", None) == MSO_SHAPE_TYPE.GROUP:
             _replace_text_tokens_in_shapes(shape.shapes, tokens)
@@ -113,6 +118,15 @@ def _replace_text_tokens_in_shapes(shapes, tokens: dict[str, str]) -> None:
         if not shape.has_text_frame:
             continue
         for para in shape.text_frame.paragraphs:
+            # Pass 1: replace runs that are exactly a single token (preserves run formatting e.g. bold)
+            for run in para.runs:
+                run_text = run.text.strip()
+                for token, value in tokens.items():
+                    if run_text == token:
+                        run.text = value
+                        break
+
+            # Pass 2: replace any remaining tokens in paragraph text (merge into first run)
             full_text = "".join(run.text for run in para.runs)
             if not full_text:
                 continue
