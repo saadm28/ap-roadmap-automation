@@ -8,15 +8,15 @@ No hardcoded page numbers.
 CHART_CROPS = {
     "timeline": {
         "anchors": ["Events & Goals"],
-        "crop": (20, 130, 575, 430),  # Timeline only: legend, age axis, colored bar, event icons; include age numbers
+        "crop": (20, 250, 575, 430),  # Timeline only: legend, age axis, colored bar, event icons; include age numbers
     },
     "cashflow": {
         "anchors": ["Financial Summary"],
-        "crop": (20, 235, 575, 465),  # Chart only; extra top crop to remove white space (Slide 9 & 12)
+        "crop": (20, 275, 575, 465),  # Chart only; extra top crop to remove white space (Slide 9 & 12)
     },
     "liquid_assets": {
         "anchors": ["Liquid Assets"],
-        "crop": (20, 140, 575, 620),  # Chart + legend; tight bottom to exclude white space below x-axis/icons
+        "crop": (20, 180, 575, 620),  # Chart + legend; tight bottom to exclude white space below x-axis/icons
     },
 }
 

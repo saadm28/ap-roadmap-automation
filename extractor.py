@@ -108,8 +108,10 @@ def extract_value_from_text(text: str, pattern: str) -> Optional[int]:
         return None
 
 
-def extract_values_from_doc(doc: fitz.Document) -> dict[str, Any]:
-    """Extract all values from doc. Returns dict with int/str/None values (numeric keys + client_name, report_date, report_month, report_year from first page)."""
+def extract_values_from_doc(doc: fitz.Document, retirement_year_override: Optional[int] = None) -> dict[str, Any]:
+    """Extract all values from doc. Returns dict with int/str/None values (numeric keys + client_name, report_date, report_month, report_year from first page).
+    If retirement_year_override is set, use it for liquid assets table column lookup instead of deriving from PDF (allows different retirement ages per report).
+    """
     result = {}
     for key, cfg in VALUE_EXTRACTORS.items():
         page_num = find_page_by_anchors(doc, cfg["anchors"])
@@ -120,9 +122,9 @@ def extract_values_from_doc(doc: fitz.Document) -> dict[str, Any]:
         result[key] = extract_value_from_text(text, cfg["regex"])
     # Liquid assets at retirement: from table (Savings + Investments + Pensions) at retirement year, not regex.
     # Single code path: same logic used by app (run_extraction) and scripts/test_liquid_assets.py (extract_liquid_assets_debug).
-    result["liquid_assets_retirement"] = _extract_liquid_assets_table_total(doc)
+    result["liquid_assets_retirement"] = _extract_liquid_assets_table_total(doc, retirement_year_override=retirement_year_override)
     if result["liquid_assets_retirement"] is None:
-        liq_debug = extract_liquid_assets_debug(doc)
+        liq_debug = extract_liquid_assets_debug(doc, retirement_year_override=retirement_year_override)
         logger.warning(
             "Liquid assets not extracted. retirement_year=%s, table_page=%s, pages_with_heading=%s, error=%s",
             liq_debug.get("retirement_year"),
@@ -164,6 +166,49 @@ def _extract_first_page_meta(doc: fitz.Document) -> dict[str, Optional[str]]:
             except ValueError:
                 pass
     return out
+
+
+def _extract_post_retirement_spending_from_any_page(doc: fitz.Document) -> tuple[Optional[int], Optional[int], Optional[str]]:
+    """
+    Search ALL pages for "You can afford to spend £X" / "Projected Spending Capacity" / "annually excluding taxes in retirement".
+    Used when the Retirement Summary (Slide 14) page doesn't contain this text (it often appears on Insights | Retirement Spending or Financial Summary).
+    Returns (value, 1_based_page_num, matched_span_for_debug) or (None, None, None).
+    """
+    flags = re.IGNORECASE | re.DOTALL
+    # Patterns that indicate the spending capacity sentence (order: prefer full phrase then anchor)
+    anchors = [
+        "You can afford to spend",
+        "Projected Spending Capacity in Retirement",
+        "annually excluding taxes in retirement",
+    ]
+    patterns = [
+        r"You\s+can\s+afford\s+to\s+spend\s*(?:£\s*)?([\d,]+).*?(?:per\s+year|annually|excluding)",
+        r"Projected\s+Spending\s+Capacity.*?(?:£\s*)?([\d,]+)",
+        r"afford\s+to\s+spend\s*(?:£\s*)?([\d,]+)\s+annually\s+excluding\s+taxes",
+    ]
+    for page_idx in range(len(doc)):
+        text = get_page_text(doc, page_idx)
+        for pattern in patterns:
+            m = re.search(pattern, text, flags)
+            if m:
+                try:
+                    val = int(m.group(1).replace(",", ""))
+                    return (val, page_idx + 1, m.group(0)[:300])
+                except (ValueError, IndexError):
+                    continue
+        # Fallback: any page containing an anchor, then first £ amount in window
+        for anchor in anchors:
+            idx = text.find(anchor)
+            if idx >= 0:
+                window = text[idx : idx + 250]
+                mm = re.search(r"£\s*([\d,]+)", window)
+                if mm:
+                    try:
+                        val = int(mm.group(1).replace(",", ""))
+                        return (val, page_idx + 1, mm.group(0)[:200])
+                    except ValueError:
+                        continue
+    return (None, None, None)
 
 
 def _extract_financial_summary_slide14(doc: fitz.Document, spans_out: Optional[dict[str, str]] = None) -> dict[str, Optional[int]]:
@@ -253,7 +298,10 @@ def _extract_financial_summary_slide14(doc: fitz.Document, spans_out: Optional[d
             out["annual_savings_required"] = int(m.group(1).replace(",", ""))
             if spans_out is not None:
                 spans_out["annual_savings_required"] = m.group(0)[:300]
-    m = re.search(r"Expenses\s+are\s+not\s+funded\s+in\s+(\d+)\s+years", text, flags)
+    # POST "not funded" years: robust to PyMuPDF text order (e.g. "funded in not X years" when "not" is jumbled)
+    m = re.search(r"Expenses\s+are\s+(?:not\s+)?funded\s+in\s+(?:not\s+)?(\d+)\s+years", text, flags)
+    if not m:
+        m = re.search(r"Expenses\s+are\s+not\s+funded\s+in\s+(\d+)\s+years", text, flags)
     if not m:
         m = re.search(r"Expenses\s+are\s+funded\s+in\s+not\s+(\d+)\s+years", text, flags)
     if m:
@@ -280,6 +328,14 @@ def _extract_financial_summary_slide14(doc: fitz.Document, spans_out: Optional[d
                 out["post_retirement_spending"] = int(mm.group(1).replace(",", ""))
                 if spans_out is not None:
                     spans_out["post_retirement_spending"] = mm.group(0)[:300]
+    # If still missing, search all pages (Insights | Retirement Spending / Financial Summary often have this, not Slide 14)
+    if out["post_retirement_spending"] is None:
+        val, from_page, span = _extract_post_retirement_spending_from_any_page(doc)
+        if val is not None:
+            out["post_retirement_spending"] = val
+            if spans_out is not None and span:
+                spans_out["post_retirement_spending"] = span
+                spans_out["post_retirement_spending_page"] = str(from_page)
     return out
 
 
@@ -294,6 +350,8 @@ def extract_financial_summary_slide14_debug(doc: fitz.Document) -> tuple[dict[st
         ("save an additional ... per year ... £X (b)", r"save\s+an\s+additional.*?per\s+year.*?£\s*([\d,]+)", ("annual_savings_required", None)),
         ("save an additional ... annually", r"Save\s+an\s+additional\s*(?:£\s*)?([\d,]+)\s+annually", ("annual_savings_required", None)),
         ("Expenses are not funded in X years", r"Expenses\s+are\s+not\s+funded\s+in\s+(\d+)\s+years", ("post_not_funded_years", None)),
+        ("Expenses are funded in not X years (jumbled)", r"Expenses\s+are\s+funded\s+in\s+not\s+(\d+)\s+years", ("post_not_funded_years", None)),
+        ("Expenses are [not] funded in [not] X (flexible)", r"Expenses\s+are\s+(?:not\s+)?funded\s+in\s+(?:not\s+)?(\d+)\s+years", ("post_not_funded_years", None)),
         ("Expenses are funded in X years", r"Expenses\s+are\s+funded\s+in\s+(?!not\s)(\d+)\s+years", ("post_funded_years", None)),
         ("You can afford to spend ... (DOTALL)", r"You\s+can\s+afford\s+to\s+spend\s*(?:£\s*)?([\d,]+).*?(?:per\s+year|annually)", ("post_retirement_spending", None)),
     ]
@@ -410,9 +468,10 @@ def find_liquid_assets_table_page(doc: fitz.Document) -> Optional[int]:
     return candidates[0][1]
 
 
-def extract_liquid_assets_debug(doc: fitz.Document) -> dict:
+def extract_liquid_assets_debug(doc: fitz.Document, retirement_year_override: Optional[int] = None) -> dict:
     """
     Run liquid assets table extraction and return debug_info dict.
+    If retirement_year_override is set, use it for column lookup instead of deriving from PDF.
     Debug includes: pages with heading, page scores (why chosen/skipped), retirement year, parsed rows, header column, values summed, error if any.
     """
     debug = {
@@ -446,8 +505,8 @@ def extract_liquid_assets_debug(doc: fitz.Document) -> dict:
             text = get_page_text(doc, i)
             if LIQUID_ASSETS_HEADING in text:
                 debug["liquid_heading_pages"].append(i + 1)  # 1-based for display
-        # Retirement year: prefer Retirement Summary (Slide 14), else fallback
-        debug["retirement_year"] = _get_retirement_year_for_liquid(doc)
+        # Retirement year: override (e.g. from retirement age) or from PDF (Slide 14 / fallback)
+        debug["retirement_year"] = retirement_year_override if retirement_year_override is not None else _get_retirement_year_for_liquid(doc)
         # Candidate page scores: why each page was chosen or skipped
         for i in range(len(doc)):
             text = get_page_text(doc, i)
@@ -684,8 +743,8 @@ def _sum_liquid_from_block(
     Scan rows from header_row_index+1 until block_end (exclusive). Detect rows by first cell using
     normalized startswith(savings|investments|pensions). Column for retirement year: if year_ordinal
     is set, use 1 + year_ordinal (position among year columns); else use retirement_col_index. If
-    effective column >= len(row), cap to len(row)-1 and log warning. debug_out: optional dict to add
-    block_rows_scanned, block_first_cells_as_read.
+    effective column >= len(row), treat that row as £0 (blank/drawn down for that year), do not use
+    the last cell. debug_out: optional dict to add block_rows_scanned, block_first_cells_as_read.
     """
     total = 0
     values_by_label = {}
@@ -707,11 +766,15 @@ def _sum_liquid_from_block(
         else:
             effective_col = retirement_col_index
         if effective_col >= len(cells):
-            logger.warning(
-                "Liquid assets: retirement column index %s >= len(row)=%s, capping to len(row)-1=%s; row=%s",
-                effective_col, len(cells), len(cells) - 1, cells,
+            # Column exists in header but this row has no value for that year (e.g. asset drawn down) → £0
+            logger.debug(
+                "Liquid assets: row index %s retirement column %s >= len(row)=%s, treating as £0; row=%s",
+                ri, effective_col, len(cells), cells,
             )
-            effective_col = len(cells) - 1
+            values_by_label[canonical_label] = 0
+            if debug_out is not None:
+                block_rows_scanned.append((ri, first_cell_raw, list(cells) if cells else []))
+            continue
         val = _parse_int_from_cell(cells[effective_col])
         if val is not None:
             total += val
@@ -724,9 +787,9 @@ def _sum_liquid_from_block(
     return total, values_by_label
 
 
-def _extract_liquid_assets_table_total(doc: fitz.Document) -> Optional[int]:
+def _extract_liquid_assets_table_total(doc: fitz.Document, retirement_year_override: Optional[int] = None) -> Optional[int]:
     """
-    Find Liquid Assets table page; get retirement year from Retirement Summary when possible.
+    Find Liquid Assets table page; get retirement year from override (if set), else from Retirement Summary when possible.
     Identify header row and column for that year; define block (until next year row or end);
     within block only, detect Savings/Investments/Pensions by first cell and sum values at retirement column.
     """
@@ -734,7 +797,7 @@ def _extract_liquid_assets_table_total(doc: fitz.Document) -> Optional[int]:
     if page_num is None:
         return None
     page = doc[page_num]
-    retirement_year = _get_retirement_year_for_liquid(doc)
+    retirement_year = retirement_year_override if retirement_year_override is not None else _get_retirement_year_for_liquid(doc)
     try:
         raw = page.get_text("dict")
     except Exception:
@@ -868,11 +931,11 @@ def extract_charts_from_pdf(
 # Extract values for one PDF (pre or post): 4 value types from anchor pages
 # ---------------------------------------------------------------------------
 
-def extract_values_from_pdf(pdf_path: Path) -> dict[str, Any]:
-    """Returns dict with all extracted values (int/str/None)."""
+def extract_values_from_pdf(pdf_path: Path, retirement_year_override: Optional[int] = None) -> dict[str, Any]:
+    """Returns dict with all extracted values (int/str/None). If retirement_year_override is set, use it for liquid assets column lookup."""
     doc = fitz.open(pdf_path)
     try:
-        return extract_values_from_doc(doc)
+        return extract_values_from_doc(doc, retirement_year_override=retirement_year_override)
     finally:
         doc.close()
 
@@ -881,9 +944,11 @@ def extract_values_from_pdf(pdf_path: Path) -> dict[str, Any]:
 # Pre-advice: charts + values (same interface for app/summary)
 # ---------------------------------------------------------------------------
 
-def extract_pre_advice(pdf_path: Path, charts_dir: Path) -> tuple[dict, dict]:
-    """Returns (values_dict, charts_dict). values_dict uses retirement_spending_annual, estate_tax_iht, etc. for compatibility."""
-    raw_values = extract_values_from_pdf(pdf_path)
+def extract_pre_advice(pdf_path: Path, charts_dir: Path, retirement_year_override: Optional[int] = None) -> tuple[dict, dict]:
+    """Returns (values_dict, charts_dict). values_dict uses retirement_spending_annual, estate_tax_iht, etc. for compatibility.
+    If retirement_year_override is set, use it for liquid assets column lookup (e.g. birth_year + pre_retirement_age).
+    """
+    raw_values = extract_values_from_pdf(pdf_path, retirement_year_override=retirement_year_override)
     values = {
         "retirement_spending_annual": raw_values.get("retirement_spending"),
         "estate_tax_iht": raw_values.get("estate_tax"),
@@ -911,9 +976,9 @@ def extract_pre_advice(pdf_path: Path, charts_dir: Path) -> tuple[dict, dict]:
 # Post-advice: charts + values
 # ---------------------------------------------------------------------------
 
-def extract_post_advice(pdf_path: Path, charts_dir: Path) -> tuple[dict, dict]:
-    """Returns (values_dict, charts_dict)."""
-    raw_values = extract_values_from_pdf(pdf_path)
+def extract_post_advice(pdf_path: Path, charts_dir: Path, retirement_year_override: Optional[int] = None) -> tuple[dict, dict]:
+    """Returns (values_dict, charts_dict). If retirement_year_override is set, use it for liquid assets column lookup."""
+    raw_values = extract_values_from_pdf(pdf_path, retirement_year_override=retirement_year_override)
     values = {
         "retirement_spending_annual": raw_values.get("retirement_spending"),
         "estate_tax_iht": raw_values.get("estate_tax"),
@@ -1124,9 +1189,12 @@ def run_extraction(
     comparison_pdf_paths: list[Path],
     output_base: Path,
     print_summary: bool = True,
+    pre_retirement_year: Optional[int] = None,
+    post_retirement_year: Optional[int] = None,
 ) -> tuple[Path, dict, dict, dict]:
     """
     Run full extraction. Returns (output_dir, pre_values, post_values, all_charts).
+    If pre_retirement_year / post_retirement_year are set, use them for liquid assets column lookup (e.g. birth_year + retirement_age).
     """
     safe_name = client_name.strip()
     for c in " /\\:*?\"<>|":
@@ -1135,8 +1203,8 @@ def run_extraction(
     charts_dir = output_dir / "charts"
     charts_dir.mkdir(parents=True, exist_ok=True)
 
-    pre_values, pre_charts = extract_pre_advice(pre_advice_path, charts_dir)
-    post_values, post_charts = extract_post_advice(post_advice_path, charts_dir)
+    pre_values, pre_charts = extract_pre_advice(pre_advice_path, charts_dir, retirement_year_override=pre_retirement_year)
+    post_values, post_charts = extract_post_advice(post_advice_path, charts_dir, retirement_year_override=post_retirement_year)
     comparison_charts = extract_comparison_charts(comparison_pdf_paths, charts_dir)
 
     all_charts = {**pre_charts, **post_charts, **comparison_charts}

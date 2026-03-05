@@ -26,6 +26,11 @@ ROADMAP_KEYS = (
     "roadmap_diff_monthly",
     "roadmap_template_type",
     "roadmap_pptx_filename",
+    "roadmap_birth_year",
+    "roadmap_pre_retirement_age",
+    "roadmap_post_retirement_age",
+    "roadmap_pre_retirement_year",
+    "roadmap_post_retirement_year",
 )
 UPLOAD_RESET_KEY = "roadmap_upload_reset_key"
 
@@ -123,6 +128,12 @@ def _render_results(output_dir: Path, pre_values: dict, post_values: dict, all_c
         hide_index=True,
     )
     st.markdown("**Slide 6 — Liquid Assets & Retirement Spending**")
+    retirement_pre_yr = st.session_state.get("roadmap_pre_retirement_year")
+    retirement_post_yr = st.session_state.get("roadmap_post_retirement_year")
+    if retirement_pre_yr is not None or retirement_post_yr is not None:
+        st.caption("Retirement years used: Pre **{}** · Post **{}**".format(
+            retirement_pre_yr or "—", retirement_post_yr or "—"
+        ))
     st.dataframe(
         [
             {"Metric": "Retirement Spending Increase (Annual)", "Value": f"£{diff_annual:,}"},
@@ -252,6 +263,44 @@ comparison_pdfs = st.file_uploader(
     key=f"comparison_pdfs_{_upload_key}",
 )
 
+st.subheader("Retirement inputs")
+st.caption("Used for extraction calculations (retirement year = birth year + retirement age).")
+col_by, col_pre, col_post = st.columns(3)
+with col_by:
+    birth_year = st.number_input(
+        "Client birth year",
+        min_value=1940,
+        max_value=2010,
+        value=1985,
+        step=1,
+        help="Primary client's birth year.",
+        key=f"birth_year_{_upload_key}",
+    )
+with col_pre:
+    pre_retirement_age = st.number_input(
+        "Pre-advice retirement age",
+        min_value=50,
+        max_value=75,
+        value=60,
+        step=1,
+        help="Retirement age in the pre-advice report.",
+        key=f"pre_retirement_age_{_upload_key}",
+    )
+with col_post:
+    post_retirement_age = st.number_input(
+        "Post-advice retirement age",
+        min_value=50,
+        max_value=75,
+        value=60,
+        step=1,
+        help="Retirement age in the post-advice report.",
+        key=f"post_retirement_age_{_upload_key}",
+    )
+
+pre_retirement_year = birth_year + pre_retirement_age
+post_retirement_year = birth_year + post_retirement_age
+st.caption(f"Retirement years used: **Pre {pre_retirement_year}** · **Post {post_retirement_year}**")
+
 generate = st.button("Generate RoadMap Assets", type="primary", use_container_width=True)
 
 
@@ -313,6 +362,8 @@ if generate:
                     comparison_pdf_paths=comparison_paths,
                     output_base=output_base,
                     print_summary=False,
+                    pre_retirement_year=pre_retirement_year,
+                    post_retirement_year=post_retirement_year,
                 )
             except Exception as e:
                 st.exception(e)
@@ -331,6 +382,11 @@ if generate:
         st.session_state["roadmap_diff_annual"] = diff_annual
         st.session_state["roadmap_diff_monthly"] = diff_monthly
         st.session_state["roadmap_template_type"] = template_type
+        st.session_state["roadmap_birth_year"] = birth_year
+        st.session_state["roadmap_pre_retirement_age"] = pre_retirement_age
+        st.session_state["roadmap_post_retirement_age"] = post_retirement_age
+        st.session_state["roadmap_pre_retirement_year"] = pre_retirement_year
+        st.session_state["roadmap_post_retirement_year"] = post_retirement_year
 
         pptx_filename = _roadmap_output_filename(template_type)
         st.session_state["roadmap_pptx_filename"] = pptx_filename
