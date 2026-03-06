@@ -1,25 +1,34 @@
 # AP Partners RoadMap Automation
 
-Streamlit app: upload **pre-** and **post-advice Voyant PDFs** (and optional FE Analytics comparison PDFs), extract charts and values, and generate a populated **RoadMap PowerPoint** (Generic or Lawyers template).
+Generate RoadMap PowerPoints from Voyant reports. Upload pre- and post-advice PDFs (and optional FE Analytics comparison charts); the app extracts charts and values and fills a Generic or Lawyers RoadMap template.
 
-## Setup
+## Quick start
 
 ```bash
 pip install -r requirements.txt
 ```
 
-Put templates in `templates/`: `Generic_RoadMap.pptx` and/or `Lawyers_Roadmap.pptx`.
-
-## Run
+Add your templates to `templates/`: `Generic_RoadMap.pptx` and/or `Lawyers_Roadmap.pptx`.
 
 ```bash
 streamlit run app.py
 ```
 
-Choose template type, upload PDFs, click **Generate RoadMap Assets**. Download the generated PPTX from the results page.
+Select template type, upload PDFs, click **Generate RoadMap Assets**, then download the PPTX from the results page.
 
-## How it works
+## What it does
 
-- **Charts & values** — Extracted from Voyant PDFs by anchor text (no fixed page numbers). Charts rendered at 300 DPI to `output/.../charts/`.
-- **PPT mapping** — Placeholder-based only: text tokens (e.g. `{{LIQUID_ASSETS_PRE}}`, `{{SHORTFALL_YEARS}}`) and shape names (e.g. `[TIMELINE_IMAGE]`, `COMP_CHART_1`) are replaced **everywhere** in the deck. Same logic for Generic and Lawyers; only the template file differs.
-- **Output filename** — `AP Partners - Generic RoadMap - YYYY-MM-DD_HHMMSS.pptx` (or Lawyers), so downloads don’t overwrite.
+- **Extraction** — Finds pages by anchor text (e.g. "Liquid Assets", "Retirement Summary"), extracts values via regex and tables, and pulls retirement years from the Retirement Summary page (first primary). Charts are cropped and rendered at 300 DPI.
+- **Templates** — Replaces placeholders (e.g. `{{LIQUID_ASSETS_PRE}}`, `{{SHORTFALL_YEARS}}`) and mapped shape names (e.g. timeline, cashflow, comparison charts) in your PPTX. Output: `AP Partners - Generic/Lawyers RoadMap - YYYY-MM-DD_HHMMSS.pptx`.
+
+## Deploy on Streamlit Cloud
+
+1. Push this repo to GitHub.
+2. At [share.streamlit.io](https://share.streamlit.io), sign in with GitHub and click **New app**.
+3. Select your repo, branch `main`, and set **Main file path** to `app.py`.
+4. Deploy. Add the template files to `templates/` in the repo if you want PPTX download to work in the cloud app.
+
+## Requirements
+
+- Python 3.10+
+- See `requirements.txt` for dependencies (Streamlit, PyMuPDF, Pillow, python-pptx).
