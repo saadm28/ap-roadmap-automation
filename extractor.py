@@ -43,6 +43,46 @@ SLIDE14_ANCHOR_PHRASES = [
 ]
 
 
+# Pattern for "Retirement Age: X (YYYY)" — used block-by-block to handle two-column layout
+_RETIREMENT_AGE_YEAR_PATTERN = re.compile(r"Retirement\s+Age:\s*(\d+)\s*\((\d{4})\)", re.IGNORECASE)
+
+
+def _extract_retirement_age_year_from_page(page, page_index: Optional[int] = None) -> tuple[Optional[int], Optional[int], Optional[str]]:
+    """
+    Search page text block-by-block for 'Retirement Age: X (YYYY)' (first primary).
+    PyMuPDF two-column layout can reorder text so full-page regex fails; blocks preserve logical order.
+    Returns (age, year, match_text) of first match, or (None, None, None).
+    """
+    try:
+        blocks = page.get_text("blocks")
+    except Exception:
+        return (None, None, None)
+    if not blocks:
+        return (None, None, None)
+    for block in blocks:
+        if len(block) < 5 or not isinstance(block[4], str):
+            continue
+        text = block[4]
+        m = _RETIREMENT_AGE_YEAR_PATTERN.search(text)
+        if m:
+            try:
+                age = int(m.group(1))
+                year = int(m.group(2))
+                if 40 <= age <= 80 and 2030 <= year <= 2055:
+                    return (age, year, m.group(0)[:100])
+            except (ValueError, IndexError):
+                pass
+    return (None, None, None)
+
+
+def _find_retirement_summary_page(doc: fitz.Document) -> Optional[int]:
+    """Return the first page index (0-based) that contains 'Retirement Summary' — the page with client details and retirement ages (typically page 2, index 1). Not the Retirement Coverage page (page 3) which has shortfall data."""
+    for i in range(len(doc)):
+        if "Retirement Summary" in get_page_text(doc, i):
+            return i
+    return None
+
+
 def _find_slide14_page(doc: fitz.Document) -> tuple[Optional[int], Optional[str], str]:
     """Find page with Slide 14 content: must contain an anchor phrase AND at least one regex match (skip intro pages)."""
     # Patterns we need at least one of (same as in _extract_financial_summary_slide14)
@@ -224,6 +264,8 @@ def _extract_financial_summary_slide14(doc: fitz.Document, spans_out: Optional[d
             "post_not_funded_years": None,
             "post_funded_years": None,
             "post_retirement_spending": None,
+            "retirement_year_primary": None,
+            "retirement_age_primary": None,
         }
     text = get_page_text(doc, page_num)
     flags = re.IGNORECASE | re.DOTALL
@@ -236,7 +278,22 @@ def _extract_financial_summary_slide14(doc: fitz.Document, spans_out: Optional[d
         "post_not_funded_years": None,
         "post_funded_years": None,
         "post_retirement_spending": None,
+        "retirement_year_primary": None,
+        "retirement_age_primary": None,
     }
+    # First primary: "Retirement Age: 60 (2048)" — search Retirement Summary page (page 2, index 1), not Slide 14 shortfall page (page 3)
+    retirement_summary_page = _find_retirement_summary_page(doc)
+    if retirement_summary_page is not None:
+        page = doc[retirement_summary_page]
+        age_primary, year_primary, match_primary = _extract_retirement_age_year_from_page(page, page_index=retirement_summary_page)
+    else:
+        age_primary, year_primary, match_primary = None, None, None
+    if age_primary is not None and year_primary is not None:
+        out["retirement_age_primary"] = age_primary
+        out["retirement_year_primary"] = year_primary
+        if spans_out is not None and match_primary:
+            spans_out["retirement_age_primary"] = match_primary
+            spans_out["retirement_year_primary"] = match_primary
     m = re.search(r"shortfall\s+in\s+(\d+)\s+of\s+(\d+)\s+retirement\s+years", text, flags)
     if m:
         out["shortfall_years"] = int(m.group(1))
@@ -345,6 +402,7 @@ def extract_financial_summary_slide14_debug(doc: fitz.Document) -> tuple[dict[st
     page_num, matched_anchor, snippet = _find_slide14_page(doc)
     regex_specs = [
         ("shortfall in X of Y retirement years", r"shortfall\s+in\s+(\d+)\s+of\s+(\d+)\s+retirement\s+years", ("shortfall_years", "total_retirement_years")),
+        ("Retirement Age: X (YYYY) first primary", r"Retirement\s+Age:\s*(\d+)\s*\((\d{4})\)", ("retirement_age_primary", "retirement_year_primary")),
         ("lump sum + year (DOTALL)", r"additional\s+lump\s+sum\s+of\s*(?:£\s*)?([\d,]+).*?\s+in\s+(\d{4})", ("lump_sum_required", "retirement_year_lump")),
         ("save an additional ... £X ... per year (a)", r"save\s+an\s+additional.*?£\s*([\d,]+).*?per\s+year", ("annual_savings_required", None)),
         ("save an additional ... per year ... £X (b)", r"save\s+an\s+additional.*?per\s+year.*?£\s*([\d,]+)", ("annual_savings_required", None)),
@@ -368,7 +426,27 @@ def extract_financial_summary_slide14_debug(doc: fitz.Document) -> tuple[dict[st
     flags_debug = re.IGNORECASE | re.DOTALL
     values = _extract_financial_summary_slide14(doc, spans_out=debug["matched_spans"])
     debug["annual_savings_required_extracted"] = values.get("annual_savings_required")
+    if values.get("retirement_year_primary") is not None or values.get("retirement_age_primary") is not None:
+        logger.info(
+            "Slide 14: extracted first primary retirement age=%s, year=%s (used for liquid assets when no override)",
+            values.get("retirement_age_primary"),
+            values.get("retirement_year_primary"),
+        )
     for (name, pattern, keys) in regex_specs:
+        if name == "Retirement Age: X (YYYY) first primary":
+            # This is extracted block-by-block, not by full-page regex; show result from values
+            age_val = values.get("retirement_age_primary")
+            year_val = values.get("retirement_year_primary")
+            matched = age_val is not None and year_val is not None
+            debug["regex_results"].append({
+                "name": name,
+                "pattern": pattern,
+                "matched": matched,
+                "match_text": f"Retirement Age: {age_val} ({year_val})" if matched else None,
+                "groups": [age_val, year_val] if matched else [],
+                "extracted": {"retirement_age_primary": age_val, "retirement_year_primary": year_val} if matched else {},
+            })
+            continue
         m = re.search(pattern, text, flags_debug)
         if m:
             groups = list(m.groups())
@@ -413,17 +491,33 @@ def extract_retirement_year(doc: fitz.Document) -> int:
     return DEFAULT_RETIREMENT_YEAR
 
 
-def _get_retirement_year_for_liquid(doc: fitz.Document) -> int:
-    """Prefer retirement year from Retirement Summary (Slide 14) page; else fall back to extract_retirement_year."""
+def _get_retirement_year_for_liquid_with_source(doc: fitz.Document) -> tuple[int, str]:
+    """Return (year, source). Source is 'from PDF extraction', 'from lump sum year', or 'from default fallback'."""
+    retirement_summary_page = _find_retirement_summary_page(doc)
+    if retirement_summary_page is not None:
+        page = doc[retirement_summary_page]
+        age_primary, year_primary, _ = _extract_retirement_age_year_from_page(page, page_index=retirement_summary_page)
+        if year_primary is not None:
+            logger.debug("Liquid assets: using retirement year from Slide 14 first primary (block scan): %s", year_primary)
+            return (year_primary, "from PDF extraction")
     page_num, _, _ = _find_slide14_page(doc)
     if page_num is not None:
         text = get_page_text(doc, page_num)
         m = re.search(r"lump\s+sum.*?in\s+(\d{4})", text, re.IGNORECASE | re.DOTALL)
         if m:
             y = int(m.group(1))
-            if 2030 <= y <= 2049:
-                return y
-    return extract_retirement_year(doc)
+            if 2030 <= y <= 2055:
+                return (y, "from lump sum year")
+    logger.warning(
+        "Retirement year auto-extraction failed (no 'Retirement Age: X (YYYY)' in Slide 14 blocks and no lump sum year). Using fallback; consider passing --birth-year and --pre-age/--post-age."
+    )
+    return (extract_retirement_year(doc), "from default fallback")
+
+
+def _get_retirement_year_for_liquid(doc: fitz.Document) -> int:
+    """Prefer retirement year from Retirement Summary page (page 2): first primary 'Retirement Age: X (YYYY)' (block scan); then lump sum year from Slide 14 page; else fall back to extract_retirement_year."""
+    year, _ = _get_retirement_year_for_liquid_with_source(doc)
+    return year
 
 
 # ---------------------------------------------------------------------------
@@ -476,6 +570,7 @@ def extract_liquid_assets_debug(doc: fitz.Document, retirement_year_override: Op
     """
     debug = {
         "retirement_year": None,
+        "retirement_year_source": None,
         "liquid_heading_pages": [],
         "candidate_page_scores": [],
         "table_page_found": None,
@@ -506,7 +601,13 @@ def extract_liquid_assets_debug(doc: fitz.Document, retirement_year_override: Op
             if LIQUID_ASSETS_HEADING in text:
                 debug["liquid_heading_pages"].append(i + 1)  # 1-based for display
         # Retirement year: override (e.g. from retirement age) or from PDF (Slide 14 / fallback)
-        debug["retirement_year"] = retirement_year_override if retirement_year_override is not None else _get_retirement_year_for_liquid(doc)
+        if retirement_year_override is not None:
+            debug["retirement_year"] = retirement_year_override
+            debug["retirement_year_source"] = "from manual override"
+        else:
+            year, source = _get_retirement_year_for_liquid_with_source(doc)
+            debug["retirement_year"] = year
+            debug["retirement_year_source"] = source
         # Candidate page scores: why each page was chosen or skipped
         for i in range(len(doc)):
             text = get_page_text(doc, i)
@@ -768,8 +869,8 @@ def _sum_liquid_from_block(
         if effective_col >= len(cells):
             # Column exists in header but this row has no value for that year (e.g. asset drawn down) → £0
             logger.debug(
-                "Liquid assets: row index %s retirement column %s >= len(row)=%s, treating as £0; row=%s",
-                ri, effective_col, len(cells), cells,
+                "Liquid assets: row has no data for retirement year, using £0; row=%s",
+                cells,
             )
             values_by_label[canonical_label] = 0
             if debug_out is not None:
@@ -967,6 +1068,8 @@ def extract_pre_advice(pdf_path: Path, charts_dir: Path, retirement_year_overrid
         "report_date": raw_values.get("report_date"),
         "report_month": raw_values.get("report_month"),
         "report_year": raw_values.get("report_year"),
+        "retirement_year_primary": raw_values.get("retirement_year_primary"),
+        "retirement_age_primary": raw_values.get("retirement_age_primary"),
     }
     charts = extract_charts_from_pdf(pdf_path, charts_dir, "pre")
     return values, charts
@@ -997,6 +1100,8 @@ def extract_post_advice(pdf_path: Path, charts_dir: Path, retirement_year_overri
         "report_date": raw_values.get("report_date"),
         "report_month": raw_values.get("report_month"),
         "report_year": raw_values.get("report_year"),
+        "retirement_year_primary": raw_values.get("retirement_year_primary"),
+        "retirement_age_primary": raw_values.get("retirement_age_primary"),
     }
     charts = extract_charts_from_pdf(pdf_path, charts_dir, "post")
 
@@ -1019,14 +1124,15 @@ def extract_post_advice(pdf_path: Path, charts_dir: Path, retirement_year_overri
 # ---------------------------------------------------------------------------
 
 def _comparison_chart_crop(page: fitz.Page) -> tuple[float, float, float, float]:
-    """Crop rect from page dimensions: exclude header/footer, keep chart + legends; tight margins to minimise white space."""
+    """Crop rect from page dimensions: exclude header/footer, keep chart + legends; tight margins to minimise white space (more crop left/right/bottom)."""
     r = page.rect
     width = r.x1 - r.x0
     height = r.y1 - r.y0
     margin_top = 115
-    margin_bottom = 110
-    margin_side = 35
-    return (margin_side, margin_top, width - margin_side, height - margin_bottom)
+    margin_bottom = 150   # crop more from bottom to remove white space
+    margin_left = 105    # crop more from left
+    margin_right = 92    # crop a bit more from right
+    return (margin_left, margin_top, width - margin_right, height - margin_bottom)
 
 
 # Max total comparison charts across all files and pages (avoids runaway output)
