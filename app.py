@@ -256,7 +256,6 @@ post_pdf = st.file_uploader(
     help="One PDF only. Required.",
     key=f"post_pdf_{_upload_key}",
 )
-st.caption("Retirement years for liquid assets are read automatically from each report (Retirement Summary page).")
 comparison_pdfs = st.file_uploader(
     "FE Analytics / Custom comparison charts",
     type=["pdf"],
