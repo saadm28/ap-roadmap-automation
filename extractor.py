@@ -179,6 +179,31 @@ def extract_values_from_doc(doc: fitz.Document, retirement_year_override: Option
     return result
 
 
+def _primary_client_display_name(raw: str) -> str:
+    """
+    From a client name line, return the primary person's full name for display. Handles:
+    - Single name: "Thomas Boone" -> "Thomas Boone"
+    - Couple, shared surname: "Ryan and Megan Bloggs" -> "Ryan Bloggs" (first name + last word)
+    - Both full names before " and ": "Joe Bloggs and Jane Bloggs" -> "Joe Bloggs" (first part is already primary's full name; do not append last word)
+    """
+    s = (raw or "").strip()
+    if not s:
+        return s
+    if " and " not in s:
+        return s
+    first_part = s.split(" and ", 1)[0].strip()
+    first_words = first_part.split()
+    # If first part already has 2+ words, treat it as primary's full name and use as-is (don't append last word)
+    if len(first_words) >= 2:
+        return first_part
+    words = s.split()
+    # First part is single word (e.g. "Ryan"); only then append shared surname (last word) when there are 4+ words
+    if len(words) >= 4:
+        last_word = words[-1]
+        return first_part + " " + last_word
+    return first_part
+
+
 def _extract_first_page_meta(doc: fitz.Document) -> dict[str, Optional[str]]:
     """Extract client name and report date from first page. Returns client_name, report_date, report_month, report_year."""
     out = {"client_name": None, "report_date": None, "report_month": None, "report_year": None}
@@ -188,7 +213,8 @@ def _extract_first_page_meta(doc: fitz.Document) -> dict[str, Optional[str]]:
     # Client name: line after "Financial Plan for"
     m = re.search(r"Financial\s+Plan\s+for\s*[\r\n]+\s*([^\r\n]+)", text, re.IGNORECASE)
     if m:
-        out["client_name"] = m.group(1).strip()
+        raw = m.group(1).strip()
+        out["client_name"] = _primary_client_display_name(raw)
     # Date: after "Prepared:" in DD/MM/YYYY format
     m = re.search(r"Prepared:\s*[\r\n]*(\d{1,2}/\d{1,2}/\d{4})", text, re.IGNORECASE)
     if m:

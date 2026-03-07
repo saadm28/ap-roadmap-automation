@@ -210,12 +210,8 @@ def populate_roadmap_pptx(
     if total_retirement_years is not None and shortfall_years is not None:
         pre_funded_years = total_retirement_years - shortfall_years
 
-    # Primary client name only (before " and ") for title slide / CLIENT_NAME placeholder
-    raw_client_name = (client_name or "—").strip()
-    if " and " in raw_client_name:
-        display_client_name = raw_client_name.split(" and ", 1)[0].strip()
-    else:
-        display_client_name = raw_client_name
+    # Primary client name (already normalized by extractor: e.g. "Ryan Bloggs" from "Ryan and Megan Bloggs")
+    display_client_name = (client_name or "—").strip()
 
     # Replace {{REPORT_MONTH}}der first (template typo/fragment) so it becomes just the month, then other tokens
     report_month_val = report_month or "—"
