@@ -16,13 +16,11 @@ logger = logging.getLogger(__name__)
 
 
 def _fmt_liquid_millions(value: Optional[int]) -> str:
-    """Format liquid total (in £) as c.£Xm. One decimal if needed; no trailing .0 if whole."""
+    """Format liquid total (in £) as c.£X.XXm, always 2 decimal places."""
     if value is None:
         return "—"
     millions = value / 1_000_000
-    if millions == int(millions):
-        return f"c.£{int(millions)}m"
-    return f"c.£{millions:.1f}m"
+    return f"c.£{millions:.2f}m"
 
 
 def _fmt_gbp(value: Optional[int]) -> str:
@@ -233,6 +231,7 @@ def populate_roadmap_pptx(
         "{{POST_NOT_FUNDED_YEARS}}": str(post_not_funded_years) if post_not_funded_years is not None else "—",
         "{{POST_FUNDED_YEARS}}": str(post_funded_years) if post_funded_years is not None else "—",
         "{{POST_RETIREMENT_SPENDING}}": _fmt_gbp(post_retirement_spending),
+        "{{ONTRACK_FLAG}}": "not" if (post_not_funded_years is not None and post_not_funded_years > 0) else "",
     }
 
     for slide in prs.slides:
