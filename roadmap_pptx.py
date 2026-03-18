@@ -10,6 +10,7 @@ from typing import Optional, Tuple, Any
 
 from PIL import Image
 from pptx import Presentation
+from pptx.chart.data import ChartData
 from pptx.enum.shapes import MSO_SHAPE_TYPE
 
 logger = logging.getLogger(__name__)
@@ -148,6 +149,33 @@ def _replace_text_tokens(slide, tokens: dict[str, str]) -> None:
     _replace_text_tokens_in_shapes(slide.shapes, tokens)
 
 
+def _update_trajectory_chart(prs, shape_name: str, not_funded: Optional[int], funded: Optional[int]) -> None:
+    """
+    Update a stacked bar trajectory chart by Selection Pane name.
+    Series 1 = not-funded years (lighter colour), Series 2 = funded years (dark colour).
+    Searches all slides so chart can be on any slide.
+    """
+    if not_funded is None or funded is None:
+        logger.warning("Skipping chart %s: missing data (not_funded=%s, funded=%s)", shape_name, not_funded, funded)
+        return
+    for slide in prs.slides:
+        shape, _, _ = _find_shape_by_name(slide, shape_name)
+        if shape is None:
+            continue
+        try:
+            chart_data = ChartData()
+            chart_data.categories = [""]
+            chart_data.add_series("Series 1", (funded,))
+            chart_data.add_series("Series 2", (not_funded,))
+            shape.chart.replace_data(chart_data)
+            logger.info("Updated chart %s: not_funded=%s, funded=%s", shape_name, not_funded, funded)
+            return
+        except Exception as e:
+            logger.warning("Failed to update chart %s: %s", shape_name, e)
+            return
+    logger.warning("Chart shape '%s' not found in deck", shape_name)
+
+
 # Shape name -> chart key in all_charts. Every occurrence of each shape name in the deck is replaced.
 IMAGE_PLACEHOLDERS = [
     ("[TIMELINE_IMAGE]", "pre_timeline"),
@@ -254,5 +282,9 @@ def populate_roadmap_pptx(
         for slide in prs.slides:
             while _replace_shape_with_image(slide, shape_name, path):
                 pass
+
+    # ---- Trajectory charts — update stacked bar proportions from extracted years data ----
+    _update_trajectory_chart(prs, "PRE_ADVICE_CHART", shortfall_years, pre_funded_years)
+    _update_trajectory_chart(prs, "POST_ADVICE_CHART", post_not_funded_years, post_funded_years)
 
     prs.save(str(output_path))
