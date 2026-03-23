@@ -152,28 +152,39 @@ def _replace_text_tokens(slide, tokens: dict[str, str]) -> None:
 def _update_trajectory_chart(prs, shape_name: str, not_funded: Optional[int], funded: Optional[int]) -> None:
     """
     Update a stacked bar trajectory chart by Selection Pane name.
-    Series 1 = not-funded years (lighter colour), Series 2 = funded years (dark colour).
+    Series 1 = funded years (dark/bottom), Series 2 = not-funded years (light/top).
     Searches all slides so chart can be on any slide.
     """
+    print(f"[CHART DEBUG] {shape_name}: not_funded={not_funded}, funded={funded}")
     if not_funded is None or funded is None:
+        print(f"[CHART DEBUG] {shape_name}: SKIPPED — one or both values are None")
         logger.warning("Skipping chart %s: missing data (not_funded=%s, funded=%s)", shape_name, not_funded, funded)
         return
-    for slide in prs.slides:
+    found_on_slide = None
+    for i, slide in enumerate(prs.slides):
         shape, _, _ = _find_shape_by_name(slide, shape_name)
         if shape is None:
             continue
+        found_on_slide = i + 1
+        print(f"[CHART DEBUG] {shape_name}: found on slide {found_on_slide}, shape type={shape.shape_type}, has_chart={getattr(shape, 'has_chart', 'N/A')}")
         try:
+            chart = shape.chart
+            print(f"[CHART DEBUG] {shape_name}: chart type={chart.chart_type}, series count={len(chart.series)}")
             chart_data = ChartData()
             chart_data.categories = [""]
             chart_data.add_series("Series 1", (funded,))
             chart_data.add_series("Series 2", (not_funded,))
-            shape.chart.replace_data(chart_data)
+            chart.replace_data(chart_data)
+            print(f"[CHART DEBUG] {shape_name}: SUCCESS — updated with funded={funded}, not_funded={not_funded}")
             logger.info("Updated chart %s: not_funded=%s, funded=%s", shape_name, not_funded, funded)
             return
         except Exception as e:
+            import traceback
+            print(f"[CHART DEBUG] {shape_name}: FAILED — {e}")
+            print(traceback.format_exc())
             logger.warning("Failed to update chart %s: %s", shape_name, e)
             return
-    logger.warning("Chart shape '%s' not found in deck", shape_name)
+    print(f"[CHART DEBUG] {shape_name}: NOT FOUND in any slide")
 
 
 # Shape name -> chart key in all_charts. Every occurrence of each shape name in the deck is replaced.
@@ -259,7 +270,7 @@ def populate_roadmap_pptx(
         "{{POST_NOT_FUNDED_YEARS}}": str(post_not_funded_years) if post_not_funded_years is not None else "—",
         "{{POST_FUNDED_YEARS}}": str(post_funded_years) if post_funded_years is not None else "—",
         "{{POST_RETIREMENT_SPENDING}}": _fmt_gbp(post_retirement_spending),
-        "{{ONTRACK_FLAG}}": "not" if (post_not_funded_years is not None and post_not_funded_years > 0) else "",
+        "{{ONTRACK_FLAG}} ": "not " if (post_not_funded_years is not None and post_not_funded_years > 0) else "",
     }
 
     for slide in prs.slides:

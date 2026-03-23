@@ -197,10 +197,14 @@ def _extract_first_page_meta(doc: fitz.Document) -> dict[str, Optional[str]]:
     m = re.search(r"Financial\s+Plan\s+for\s*[\r\n]+\s*([^\r\n]+)(?:[\r\n]+\s*([^\r\n]+))?", text, re.IGNORECASE)
     if m:
         raw = m.group(1).strip()
-        # If a second line exists and looks like a name continuation (no digits, not a known field label)
+        # If a second line exists and looks like a name continuation:
+        # must be short (≤3 words — e.g. "der Borght", "van den Berg") and contain no digits or known field labels.
+        # Longer lines are body text (e.g. "This report summarises your financial picture...").
         if m.group(2):
             second = m.group(2).strip()
-            if second and not re.search(r"\d|Prepared|Financial\s+Plan", second, re.IGNORECASE):
+            if (second
+                    and len(second.split()) <= 3
+                    and not re.search(r"\d|Prepared|Financial\s+Plan|This\s+report|report\s+summ", second, re.IGNORECASE)):
                 raw = raw + " " + second
         out["client_name"] = _primary_client_display_name(raw)
     # Date: after "Prepared:" in DD/MM/YYYY format
