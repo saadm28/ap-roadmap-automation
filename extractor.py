@@ -658,65 +658,53 @@ def extract_liquid_assets_debug(doc: fitz.Document, retirement_year_override: Op
         debug["pensions_found_on_table_page"] = "Pensions" in text
         # Parse table
         try:
-            raw = page.get_text("dict")
+            rows = _parse_liquid_assets_page_rows(page)
         except Exception as e:
-            debug["error"] = f"get_text('dict') failed: {e}"
+            debug["error"] = f"liquid table parse failed: {e}"
             return debug
-        blocks = raw.get("blocks") or []
-        rows = []
-        for block in blocks:
-            for line in block.get("lines") or []:
-                y_vals = []
-                cells = []
-                for span in line.get("spans") or []:
-                    t = (span.get("text") or "").strip()
-                    if not t:
-                        continue
-                    bbox = span.get("bbox") or (0, 0, 0, 0)
-                    x_center = (bbox[0] + bbox[2]) / 2
-                    y_center = (bbox[1] + bbox[3]) / 2
-                    y_vals.append(y_center)
-                    cells.append((x_center, t))
-                if cells:
-                    y_avg = sum(y_vals) / len(y_vals)
-                    cells.sort(key=lambda c: c[0])
-                    rows.append((y_avg, [t for _, t in cells]))
-        rows.sort(key=lambda r: r[0])
-        # Merge lines that are on the same visual row (similar y) so we get logical table rows with multiple columns
-        rows = _merge_rows_by_y(rows)
         debug["num_rows_parsed"] = len(rows)
         debug["row_preview"] = [
-            (cells[:4] if len(cells) >= 4 else cells) for _, cells in rows[:20]
-        ]  # first 4 cells of first 20 rows
+            (_cells_text_only(cells)[:4] if len(cells) >= 4 else _cells_text_only(cells)) for _, cells in rows[:20]
+        ]  # first 4 text cells of first 20 rows
         # Find year header row and column
         header_row_index, retirement_col_index = _find_year_header_row(rows, debug["retirement_year"])
         debug["header_row_index"] = header_row_index
         debug["header_col_index"] = retirement_col_index
         # Year ordinal: position of retirement year among 4-digit-year header cells (avoids header token drift)
         header_cells = rows[header_row_index][1] if header_row_index is not None and header_row_index < len(rows) else []
-        year_ordinal = _get_year_ordinal_from_header_row(header_cells, debug["retirement_year"]) if header_cells else None
+        year_ordinal = _get_year_ordinal_from_header_row(_cells_text_only(header_cells), debug["retirement_year"]) if header_cells else None
         debug["retirement_year_ordinal"] = year_ordinal
         debug["year_in_header"] = str(debug["retirement_year"]) if retirement_col_index is not None else None
         if header_row_index is None or retirement_col_index is None:
             # List candidate years found on the table page (from any cell)
             candidate_years = set()
             for _, cells in rows:
-                for c in cells:
+                for c in _cells_text_only(cells):
                     for m in _YEAR_TOKEN_RE.findall(c):
                         candidate_years.add(int(m))
             debug["candidate_years_on_page"] = sorted(candidate_years) if candidate_years else None
             debug["error"] = (
                 f"Retirement year {debug['retirement_year']} not found in any row. "
                 f"Candidate years on this page: {debug.get('candidate_years_on_page') or 'none'}. "
-                f"Row starts: {[c[:2] for _, c in rows[:5]]}"
+                f"Row starts: {[_cells_text_only(c)[:2] for _, c in rows[:5]]}"
             )
             return debug
         block_start = header_row_index
         block_end = _find_block_end(rows, header_row_index)
         debug["block_start"] = block_start
         debug["block_end"] = block_end
+        retirement_year_x: Optional[float] = None
+        if retirement_col_index is not None and retirement_col_index < len(header_cells):
+            retirement_year_x = header_cells[retirement_col_index][0]
+        debug["retirement_year_x_pt"] = retirement_year_x
         total, values_by_label = _sum_liquid_from_block(
-            rows, header_row_index, retirement_col_index, block_end, debug_out=debug, year_ordinal=year_ordinal
+            rows,
+            header_row_index,
+            retirement_col_index,
+            block_end,
+            debug_out=debug,
+            year_ordinal=year_ordinal,
+            retirement_year_x=retirement_year_x,
         )
         debug["detected_row_labels"] = list(values_by_label.keys())
         debug["values_summed"] = dict(values_by_label)
@@ -742,30 +730,78 @@ def _parse_int_from_cell(s: str) -> Optional[int]:
         return None
 
 
-def _merge_rows_by_y(rows: list[tuple[float, list[str]]], y_tolerance: float = 6.0) -> list[tuple[float, list[str]]]:
+# Liquid table: each cell is (x_center, text) so we can align £ values to the year column when row lengths differ.
+LiquidCell = tuple[float, str]
+LiquidTableRow = tuple[float, list[LiquidCell]]
+
+
+def _cells_text_only(cells: list[LiquidCell]) -> list[str]:
+    return [t for _, t in cells]
+
+
+def _parse_liquid_assets_page_rows(page: fitz.Page) -> list[LiquidTableRow]:
+    """Build table rows from page dict: each row is (y_avg, [(x, text), ...])."""
+    rows: list[LiquidTableRow] = []
+    try:
+        raw = page.get_text("dict")
+    except Exception:
+        return rows
+    blocks = raw.get("blocks") or []
+    for block in blocks:
+        for line in block.get("lines") or []:
+            y_vals: list[float] = []
+            cells: list[LiquidCell] = []
+            for span in line.get("spans") or []:
+                t = (span.get("text") or "").strip()
+                if not t:
+                    continue
+                bbox = span.get("bbox") or (0, 0, 0, 0)
+                x_center = (bbox[0] + bbox[2]) / 2
+                y_center = (bbox[1] + bbox[3]) / 2
+                y_vals.append(y_center)
+                cells.append((x_center, t))
+            if cells:
+                y_avg = sum(y_vals) / len(y_vals)
+                cells.sort(key=lambda c: c[0])
+                rows.append((y_avg, cells))
+    rows.sort(key=lambda r: r[0])
+    return _merge_liquid_rows_by_y(rows)
+
+
+def _merge_liquid_rows_by_y(rows: list[LiquidTableRow], y_tolerance: float = 6.0) -> list[LiquidTableRow]:
     """
-    Merge lines that share the same visual row (similar y) so one logical row can have many columns.
-    Input: list of (y_center, cells). Output: list of (y_center, merged_cells) with cells sorted by position.
+    Merge lines that share the same visual row (similar y). Sort merged cells by x so columns stay ordered
+    (fixes ragged PDF lines and wrong index-based reads).
     """
     if not rows:
         return []
-    # Group by y band (round y to tolerance)
-    bands: dict[int, list[tuple[float, list[str]]]] = {}
+    bands: dict[int, list[LiquidTableRow]] = {}
     for y_avg, cells in rows:
         key = int(round(y_avg / y_tolerance) * y_tolerance)
         bands.setdefault(key, []).append((y_avg, cells))
-    out = []
+    out: list[LiquidTableRow] = []
     for key in sorted(bands.keys()):
         group = bands[key]
         y_center = sum(y for y, _ in group) / len(group)
-        # Flatten all cells and sort by original order (assume each line's cells are already x-sorted; we keep row order then cell order)
-        all_cells = []
+        all_cells: list[LiquidCell] = []
         for _, cells in group:
             all_cells.extend(cells)
-        # Dedupe by keeping order (in case same text appears; we can't sort without x) - just concatenate
+        all_cells.sort(key=lambda c: c[0])
         out.append((y_center, all_cells))
     out.sort(key=lambda r: r[0])
     return out
+
+
+# Backwards-compatible name for any future str-only callers (liquid path uses LiquidTableRow only).
+def _merge_rows_by_y(rows: list[tuple[float, list[str]]], y_tolerance: float = 6.0) -> list[tuple[float, list[str]]]:
+    """Deprecated for liquid assets; use _merge_liquid_rows_by_y with (x, text) cells."""
+    if not rows:
+        return []
+    as_liquid: list[LiquidTableRow] = []
+    for y_avg, texts in rows:
+        as_liquid.append((y_avg, [(0.0, t) for t in texts]))
+    merged = _merge_liquid_rows_by_y(as_liquid, y_tolerance=y_tolerance)
+    return [(y, [t for _, t in cells]) for y, cells in merged]
 
 
 def _cell_looks_like_year(cell: str) -> bool:
@@ -792,7 +828,7 @@ def _get_year_ordinal_from_header_row(cells: list[str], retirement_year: int) ->
 
 
 def _find_year_header_row(
-    rows: list[tuple[float, list[str]]], retirement_year: int
+    rows: list[LiquidTableRow], retirement_year: int
 ) -> tuple[Optional[int], Optional[int]]:
     """
     Find the year header row that contains the retirement year (exact string match in a cell).
@@ -803,13 +839,14 @@ def _find_year_header_row(
     candidates = []  # (row_index, col_index, year_like_cell_count)
     for ri, (_, cells) in enumerate(rows):
         col_index = None
-        for idx, cell in enumerate(cells):
+        for idx, (_x, cell) in enumerate(cells):
             if (cell or "").strip() == year_str:
                 col_index = idx
                 break
         if col_index is None:
             continue
-        year_like_count = sum(1 for c in cells if _cell_looks_like_year(c))
+        texts = _cells_text_only(cells)
+        year_like_count = sum(1 for c in texts if _cell_looks_like_year(c))
         candidates.append((ri, col_index, year_like_count))
     if not candidates:
         return None, None
@@ -835,7 +872,28 @@ def _liquid_row_label_from_first_cell(first_cell: str) -> Optional[str]:
     return None
 
 
-def _find_block_end(rows: list[tuple[float, list[str]]], header_row_index: int) -> int:
+def _liquid_block_year_slot_count(
+    rows: list[LiquidTableRow], header_row_index: int, block_end: int, header_cells: list[LiquidCell]
+) -> int:
+    """
+    How many year/value columns this block has. Voyant sometimes omits later years from the header row text
+    while Age / numeric rows still have more columns — use max(header year count, age-row data columns).
+    """
+    n_header_years = sum(1 for t in _cells_text_only(header_cells) if _cell_looks_like_year(t))
+    age_data_cols = 0
+    for ri in range(header_row_index + 1, block_end):
+        if ri >= len(rows):
+            break
+        _, cells = rows[ri]
+        if len(cells) < 2:
+            continue
+        label = (cells[0][1] or "").strip().lower()
+        if "age" in label:
+            age_data_cols = max(age_data_cols, len(cells) - 1)
+    return max(n_header_years, age_data_cols)
+
+
+def _find_block_end(rows: list[LiquidTableRow], header_row_index: int) -> int:
     """
     Block starts at header_row_index. Block ends at the next row whose first cell is a 4-digit year, or end of table.
     Returns the exclusive end index (first row index not in this block).
@@ -844,65 +902,128 @@ def _find_block_end(rows: list[tuple[float, list[str]]], header_row_index: int) 
         _, cells = rows[ri]
         if not cells:
             continue
-        first_cell = (cells[0] or "").strip()
+        first_cell = (cells[0][1] or "").strip()
         if _cell_looks_like_year(first_cell):
             return ri
     return len(rows)
 
 
+# Max horizontal distance (pt) from header year x to accept a £ cell (column width in Voyant tables is usually ~40–90pt).
+_LIQUID_X_ALIGN_MAX_DIST_PT = 55.0
+
+
+def _liquid_row_value_at_retirement(
+    cells: list[LiquidCell],
+    retirement_year_x: Optional[float],
+    retirement_col_index: int,
+    year_ordinal: Optional[int],
+    n_year_slots: int,
+) -> tuple[Optional[int], str]:
+    """
+    Value under retirement year column. Prefer x-alignment to header year cell (handles ragged rows); else index fallback.
+    Returns (value, method) where method is x_align | index | missing | short_row_gap.
+
+    When a data row has fewer £ cells than the block has year columns (from header + Age row width), Voyant may only
+    print trailing years. If retirement_year falls before that window, the cell is blank → None (avoid mis-picks).
+    """
+    if len(cells) < 2:
+        return None, "missing"
+    data_cells = cells[1:]
+    currency_cells: list[tuple[float, str, int]] = []
+    for x, t in data_cells:
+        v = _parse_int_from_cell(t)
+        if v is not None:
+            currency_cells.append((x, t, v))
+    currency_cells.sort(key=lambda c: c[0])
+    n_curr = len(currency_cells)
+    if (
+        year_ordinal is not None
+        and n_curr > 0
+        and n_year_slots > n_curr
+        and year_ordinal < n_year_slots - n_curr
+    ):
+        return None, "short_row_gap"
+    if retirement_year_x is not None and currency_cells:
+        best_val: Optional[int] = None
+        best_dist = float("inf")
+        for x, _t, v in currency_cells:
+            d = abs(x - retirement_year_x)
+            if d < best_dist:
+                best_dist = d
+                best_val = v
+        if best_val is not None and best_dist <= _LIQUID_X_ALIGN_MAX_DIST_PT:
+            return best_val, "x_align"
+    if year_ordinal is not None:
+        effective_col = 1 + year_ordinal
+    else:
+        effective_col = retirement_col_index
+    texts = _cells_text_only(cells)
+    if effective_col < len(texts):
+        v = _parse_int_from_cell(texts[effective_col])
+        if v is not None:
+            return v, "index"
+    return None, "missing"
+
+
 def _sum_liquid_from_block(
-    rows: list[tuple[float, list[str]]],
+    rows: list[LiquidTableRow],
     header_row_index: int,
     retirement_col_index: int,
     block_end: int,
     debug_out: Optional[dict] = None,
     year_ordinal: Optional[int] = None,
+    retirement_year_x: Optional[float] = None,
 ) -> tuple[int, dict[str, int]]:
     """
     Scan rows from header_row_index+1 until block_end (exclusive). Detect rows by first cell using
-    normalized startswith(savings|investments|pensions). Column for retirement year: if year_ordinal
-    is set, use 1 + year_ordinal (position among year columns); else use retirement_col_index. If
-    effective column >= len(row), treat that row as £0 (blank/drawn down for that year), do not use
-    the last cell. debug_out: optional dict to add block_rows_scanned, block_first_cells_as_read.
+    normalized startswith(savings|investments|pensions). Pick £ at retirement column via x-alignment
+    to the header year cell when possible; else fall back to column index (year_ordinal or retirement_col_index).
     """
+    header_cells = rows[header_row_index][1] if header_row_index < len(rows) else []
+    n_year_slots = _liquid_block_year_slot_count(rows, header_row_index, block_end, header_cells)
     total = 0
     values_by_label = {}
     block_rows_scanned = []
     first_cells_as_read = []
+    x_align_debug: list[dict[str, Any]] = []
     for ri in range(header_row_index + 1, block_end):
         if ri >= len(rows):
             break
         _, cells = rows[ri]
-        first_cell_raw = (cells[0] if cells else "")
+        first_cell_raw = (cells[0][1] if cells else "")
         first_cells_as_read.append(first_cell_raw)
         canonical_label = _liquid_row_label_from_first_cell(first_cell_raw)
         if canonical_label is None:
             if debug_out is not None:
-                block_rows_scanned.append((ri, first_cell_raw, list(cells) if cells else []))
+                block_rows_scanned.append((ri, first_cell_raw, _cells_text_only(cells)))
             continue
-        if year_ordinal is not None:
-            effective_col = 1 + year_ordinal
-        else:
-            effective_col = retirement_col_index
-        if effective_col >= len(cells):
-            # Column exists in header but this row has no value for that year (e.g. asset drawn down) → £0
+        val, pick_method = _liquid_row_value_at_retirement(
+            cells,
+            retirement_year_x,
+            retirement_col_index,
+            year_ordinal,
+            n_year_slots,
+        )
+        if val is None:
             logger.debug(
-                "Liquid assets: row has no data for retirement year, using £0; row=%s",
-                cells,
+                "Liquid assets: no value for retirement column; label=%s row=%s",
+                canonical_label,
+                _cells_text_only(cells),
             )
             values_by_label[canonical_label] = 0
             if debug_out is not None:
-                block_rows_scanned.append((ri, first_cell_raw, list(cells) if cells else []))
-            continue
-        val = _parse_int_from_cell(cells[effective_col])
-        if val is not None:
+                x_align_debug.append({"row_index": ri, "label": canonical_label, "value": None, "method": pick_method})
+        else:
             total += val
             values_by_label[canonical_label] = val
+            if debug_out is not None:
+                x_align_debug.append({"row_index": ri, "label": canonical_label, "value": val, "method": pick_method})
         if debug_out is not None:
-            block_rows_scanned.append((ri, first_cell_raw, list(cells) if cells else []))
+            block_rows_scanned.append((ri, first_cell_raw, _cells_text_only(cells)))
     if debug_out is not None:
         debug_out["block_rows_scanned"] = block_rows_scanned
         debug_out["block_first_cells_as_read"] = first_cells_as_read
+        debug_out["liquid_value_pick_debug"] = x_align_debug
     return total, values_by_label
 
 
@@ -917,31 +1038,7 @@ def _extract_liquid_assets_table_total(doc: fitz.Document, retirement_year_overr
         return None
     page = doc[page_num]
     retirement_year = retirement_year_override if retirement_year_override is not None else _get_retirement_year_for_liquid(doc)
-    try:
-        raw = page.get_text("dict")
-    except Exception:
-        raw = {}
-    blocks = raw.get("blocks") or []
-    rows = []
-    for block in blocks:
-        for line in block.get("lines") or []:
-            y_vals = []
-            cells = []
-            for span in line.get("spans") or []:
-                t = (span.get("text") or "").strip()
-                if not t:
-                    continue
-                bbox = span.get("bbox") or (0, 0, 0, 0)
-                x_center = (bbox[0] + bbox[2]) / 2
-                y_center = (bbox[1] + bbox[3]) / 2
-                y_vals.append(y_center)
-                cells.append((x_center, t))
-            if cells:
-                y_avg = sum(y_vals) / len(y_vals)
-                cells.sort(key=lambda c: c[0])
-                rows.append((y_avg, [t for _, t in cells]))
-    rows.sort(key=lambda r: r[0])
-    rows = _merge_rows_by_y(rows)
+    rows = _parse_liquid_assets_page_rows(page)
     header_row_index, retirement_col_index = _find_year_header_row(rows, retirement_year)
     if header_row_index is None or retirement_col_index is None:
         logger.info(
@@ -950,12 +1047,21 @@ def _extract_liquid_assets_table_total(doc: fitz.Document, retirement_year_overr
         )
         return None
     header_cells = rows[header_row_index][1] if header_row_index < len(rows) else []
-    year_ordinal = _get_year_ordinal_from_header_row(header_cells, retirement_year) if header_cells else None
+    year_ordinal = _get_year_ordinal_from_header_row(_cells_text_only(header_cells), retirement_year) if header_cells else None
+    retirement_year_x: Optional[float] = None
+    if retirement_col_index < len(header_cells):
+        retirement_year_x = header_cells[retirement_col_index][0]
     block_start = header_row_index
     block_end = _find_block_end(rows, header_row_index)
     liquid_debug = {}
     total, values_by_label = _sum_liquid_from_block(
-        rows, header_row_index, retirement_col_index, block_end, debug_out=liquid_debug, year_ordinal=year_ordinal
+        rows,
+        header_row_index,
+        retirement_col_index,
+        block_end,
+        debug_out=liquid_debug,
+        year_ordinal=year_ordinal,
+        retirement_year_x=retirement_year_x,
     )
     detected_row_labels = list(values_by_label.keys())
     logger.info(

@@ -60,6 +60,8 @@ def _print_debug(debug: dict, label: str) -> None:
         print(f"  header_row_index:       {_fmt(debug.get('header_row_index'))}")
         print(f"  retirement_column_index: {_fmt(debug.get('header_col_index'))}")
         print(f"  retirement_year_ordinal: {_fmt(debug.get('retirement_year_ordinal'))} (0-based among year columns)")
+        if debug.get("retirement_year_x_pt") is not None:
+            print(f"  retirement_year_x_pt:   {debug.get('retirement_year_x_pt'):.1f} (header year column centre, pt)")
         print(f"  block_start:             {_fmt(debug.get('block_start'))}")
         print(f"  block_end:              {_fmt(debug.get('block_end'))}")
         print(f"  detected_row_labels:    {debug.get('detected_row_labels', [])}")
@@ -71,6 +73,9 @@ def _print_debug(debug: dict, label: str) -> None:
             print(f"    [{i}] {row}")
         print(f"  extracted_values:       {debug.get('values_summed')}")
         print(f"  final_sum:              {_fmt(debug.get('total'))}")
+        pick_dbg = debug.get("liquid_value_pick_debug") or []
+        if pick_dbg:
+            print(f"  value_pick (Savings/Inv/Pens): {pick_dbg}")
         block_rows = debug.get("block_rows_scanned")
         if block_rows:
             print(f"  block_rows_scanned (full block rows):")
