@@ -10,7 +10,7 @@ from typing import Optional, Tuple, Any
 
 from PIL import Image
 from pptx import Presentation
-from pptx.chart.data import ChartData
+from pptx.dml.color import RGBColor
 from pptx.enum.shapes import MSO_SHAPE_TYPE
 
 logger = logging.getLogger(__name__)
@@ -149,42 +149,94 @@ def _replace_text_tokens(slide, tokens: dict[str, str]) -> None:
     _replace_text_tokens_in_shapes(slide.shapes, tokens)
 
 
+_COLOR_FUNDED = RGBColor(0x20, 0x29, 0x44)      # dark navy — funded (bottom)
+_COLOR_NOT_FUNDED = RGBColor(0x79, 0xA5, 0xBB)  # light blue — not funded (top)
+
+
+_PLOT_X_FRAC = 0.188
+_PLOT_Y_FRAC = 0.0
+_PLOT_W_FRAC = 0.680
+_PLOT_H_FRAC = 0.96
+_GAP_WIDTH = 150  # gapWidth from chart XML → bar is 1/(1+gap/100) of plot width
+_BAR_W_FRAC = 1.0 / (1.0 + _GAP_WIDTH / 100.0)  # ≈ 0.4
+
+
+def _replace_chart_with_bars(slide, shape_name: str, funded: int, not_funded: int) -> bool:
+    """
+    Remove the chart shape and draw two solid-colour rectangles (stacked vertically)
+    matching the original bar's exact position inside the chart's plot area.
+    """
+    shape, _, _ = _find_shape_by_name(slide, shape_name)
+    if shape is None:
+        return False
+
+    s_left = shape.left
+    s_top = shape.top
+    s_w = shape.width
+    s_h = shape.height
+
+    total = funded + not_funded
+    if total <= 0:
+        return False
+
+    # Compute bar position/size to match the original chart's inner plot area
+    plot_left = s_left + int(s_w * _PLOT_X_FRAC)
+    plot_top = s_top + int(s_h * _PLOT_Y_FRAC)
+    plot_w = int(s_w * _PLOT_W_FRAC)
+    plot_h = int(s_h * _PLOT_H_FRAC)
+
+    bar_w = int(plot_w * _BAR_W_FRAC)
+    bar_left = plot_left + (plot_w - bar_w) // 2  # centered in plot area
+    bar_h = plot_h
+
+    funded_frac = funded / total
+    not_funded_h = int(bar_h * (not_funded / total))
+    funded_h = bar_h - not_funded_h
+
+    sp_tree = slide.shapes._spTree
+    sp_tree.remove(shape._element)
+    print(f"[CHART DEBUG] {shape_name}: removed chart shape")
+
+    from pptx.enum.shapes import MSO_SHAPE
+    rect_type = MSO_SHAPE.RECTANGLE
+
+    if not_funded_h > 0:
+        nf = slide.shapes.add_shape(rect_type, bar_left, plot_top, bar_w, not_funded_h)
+        nf.fill.solid()
+        nf.fill.fore_color.rgb = _COLOR_NOT_FUNDED
+        nf.line.fill.background()
+        print(f"[CHART DEBUG] {shape_name}: not-funded rect h={not_funded_h} ({not_funded/total:.1%})")
+
+    if funded_h > 0:
+        f = slide.shapes.add_shape(rect_type, bar_left, plot_top + not_funded_h, bar_w, funded_h)
+        f.fill.solid()
+        f.fill.fore_color.rgb = _COLOR_FUNDED
+        f.line.fill.background()
+        print(f"[CHART DEBUG] {shape_name}: funded rect h={funded_h} ({funded_frac:.1%})")
+
+    print(f"[CHART DEBUG] {shape_name}: replaced chart → rects (funded={funded}, not_funded={not_funded})")
+    return True
+
+
 def _update_trajectory_chart(prs, shape_name: str, not_funded: Optional[int], funded: Optional[int]) -> None:
     """
-    Update a stacked bar trajectory chart by Selection Pane name.
-    Series 1 = funded years (dark/bottom), Series 2 = not-funded years (light/top).
-    Searches all slides so chart can be on any slide.
+    Replace a chart shape with two solid-colour rectangles whose heights
+    are proportional to funded / not-funded years.  Bypasses all PowerPoint
+    chart-caching problems — the visual always matches the numbers.
     """
     print(f"[CHART DEBUG] {shape_name}: not_funded={not_funded}, funded={funded}")
     if not_funded is None or funded is None:
         print(f"[CHART DEBUG] {shape_name}: SKIPPED — one or both values are None")
         logger.warning("Skipping chart %s: missing data (not_funded=%s, funded=%s)", shape_name, not_funded, funded)
         return
-    found_on_slide = None
     for i, slide in enumerate(prs.slides):
-        shape, _, _ = _find_shape_by_name(slide, shape_name)
-        if shape is None:
-            continue
-        found_on_slide = i + 1
-        print(f"[CHART DEBUG] {shape_name}: found on slide {found_on_slide}, shape type={shape.shape_type}, has_chart={getattr(shape, 'has_chart', 'N/A')}")
-        try:
-            chart = shape.chart
-            print(f"[CHART DEBUG] {shape_name}: chart type={chart.chart_type}, series count={len(chart.series)}")
-            chart_data = ChartData()
-            chart_data.categories = [""]
-            chart_data.add_series("Series 1", (funded,))
-            chart_data.add_series("Series 2", (not_funded,))
-            chart.replace_data(chart_data)
-            print(f"[CHART DEBUG] {shape_name}: SUCCESS — updated with funded={funded}, not_funded={not_funded}")
-            logger.info("Updated chart %s: not_funded=%s, funded=%s", shape_name, not_funded, funded)
-            return
-        except Exception as e:
-            import traceback
-            print(f"[CHART DEBUG] {shape_name}: FAILED — {e}")
-            print(traceback.format_exc())
-            logger.warning("Failed to update chart %s: %s", shape_name, e)
+        ok = _replace_chart_with_bars(slide, shape_name, funded, not_funded)
+        if ok:
+            print(f"[CHART DEBUG] {shape_name}: SUCCESS on slide {i + 1}")
             return
     print(f"[CHART DEBUG] {shape_name}: NOT FOUND in any slide")
+
+
 
 
 # Shape name -> chart key in all_charts. Every occurrence of each shape name in the deck is replaced.
