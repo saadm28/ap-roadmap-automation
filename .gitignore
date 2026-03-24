@@ -32,6 +32,11 @@ _tmp_*.pdf
 *.zip
 test_estate_slide24_*.png
 
+# DB-managed file storage (uploads, generated outputs, stored templates)
+storage/
+uploads/
+outputs/
+
 # Client and test assets (do not push to repo)
 Client Docs/
 client_documents/
