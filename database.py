@@ -247,6 +247,14 @@ def list_templates() -> list[dict]:
 # Uploads (PDF pairs)
 # ---------------------------------------------------------------------------
 
+def _safe_dirname(name: str) -> str:
+    """Convert a client name to a safe directory name."""
+    import re
+    safe = re.sub(r'[^\w\s\-]', '', name).strip()
+    safe = re.sub(r'\s+', '_', safe)
+    return safe[:60] or "unknown"
+
+
 def save_upload(
     client_id: int,
     pre_bytes: bytes,
@@ -254,13 +262,17 @@ def save_upload(
     pre_filename: str,
     post_filename: str,
     template_type: str,
+    client_name: str = "",
 ) -> tuple[int, Path, Path]:
     """
     Save pre/post PDFs to disk, insert upload row.
     Returns (upload_id, pre_path, post_path).
+    Folder: uploads/{client_name}/{YYYYMMDD_HHMMSS}/
     """
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-    upload_dir = storage_root() / "uploads" / str(client_id) / ts
+    safe_name = _safe_dirname(client_name) if client_name and client_name != "unknown" else "unknown"
+    folder_name = f"{client_id}_{safe_name}"
+    upload_dir = storage_root() / "uploads" / folder_name / ts
     upload_dir.mkdir(parents=True, exist_ok=True)
 
     stem_pre = Path(pre_filename).stem[:80]
@@ -314,15 +326,26 @@ def list_uploads(client_id: Optional[int] = None) -> list[dict]:
 # Outputs (generated PPTXs)
 # ---------------------------------------------------------------------------
 
-def save_output(upload_id: int, pptx_bytes: bytes, filename: str) -> tuple[int, Path]:
+def save_output(upload_id: int, pptx_bytes: bytes, filename: str, out_dir: "Path | None" = None) -> tuple[int, Path]:
     """
-    Save generated PPTX to disk, insert output row.
+    Register the generated PPTX in the DB.
+    If out_dir is provided the file is written there; otherwise it falls back to the
+    upload's PDF folder.  Pass out_dir=output_dir from app.py to avoid duplicate saves.
     Returns (output_id, pptx_path).
     """
-    out_dir = storage_root() / "outputs" / str(upload_id)
-    out_dir.mkdir(parents=True, exist_ok=True)
+    if out_dir is None:
+        with _cursor() as cur:
+            cur.execute("SELECT pre_pdf_path FROM uploads WHERE id = %s", (upload_id,))
+            row = cur.fetchone()
+        if row:
+            out_dir = Path(row["pre_pdf_path"]).parent
+        else:
+            out_dir = storage_root() / "uploads" / f"upload_{upload_id}"
+            out_dir.mkdir(parents=True, exist_ok=True)
+
     pptx_path = out_dir / filename
-    pptx_path.write_bytes(pptx_bytes)
+    if not pptx_path.exists():
+        pptx_path.write_bytes(pptx_bytes)
 
     with _cursor() as cur:
         cur.execute(

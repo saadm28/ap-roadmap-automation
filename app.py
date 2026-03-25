@@ -33,6 +33,7 @@ ROADMAP_KEYS = (
     "roadmap_pre_values",
     "roadmap_post_values",
     "roadmap_all_charts",
+    "roadmap_chart_bytes",
     "roadmap_diff_annual",
     "roadmap_diff_monthly",
     "roadmap_template_type",
@@ -190,12 +191,19 @@ def _render_results(output_dir: Path, pre_values: dict, post_values: dict, all_c
 
     st.subheader("Extracted charts")
 
+    chart_bytes: dict = st.session_state.get("roadmap_chart_bytes", {})
+
     def show_chart(rel_path: str, title: str, slide_info: str) -> None:
-        path = output_dir / rel_path
-        if not path.exists():
+        data = chart_bytes.get(rel_path)
+        if not data:
+            # fallback: try disk (only available immediately after extraction)
+            path = output_dir / rel_path
+            if path.exists():
+                data = path.read_bytes()
+        if not data:
             return
         try:
-            img = Image.open(path)
+            img = Image.open(io.BytesIO(data))
             st.caption(f"**{slide_info}** — {title}")
             st.image(img, use_container_width=True)
         except Exception:
@@ -403,7 +411,7 @@ with tab_generate:
             with st.spinner("Extracting charts and values…"):
                 try:
                     output_dir, pre_values, post_values, all_charts = run_extraction(
-                        client_name="extraction",
+                        client_name="roadmap",
                         report_date=timestamp,
                         template_type=template_type,
                         pre_advice_path=pre_path,
@@ -419,7 +427,7 @@ with tab_generate:
                     st.error("Extraction failed. Check the error above.")
                     st.stop()
 
-            # Update client row with PDF-extracted name if no manual name was given
+            # Update client record + rename upload folder to extracted client name
             if _db_available and upload_id:
                 extracted_name = pre_values.get("client_name", "").strip()
                 if extracted_name and extracted_name != "unknown":
@@ -430,6 +438,24 @@ with tab_generate:
                                 "UPDATE uploads SET client_id = %s WHERE id = %s",
                                 (new_client_id, upload_id),
                             )
+                        # Rename the folder from {id}_unknown/ts → {id}_ClientName/ts
+                        old_dir = pre_path.parent
+                        folder_name = f"{new_client_id}_{db._safe_dirname(extracted_name)}"
+                        new_parent = db.storage_root() / "uploads" / folder_name
+                        new_parent.mkdir(parents=True, exist_ok=True)
+                        new_dir = new_parent / old_dir.name
+                        if not new_dir.exists():
+                            old_dir.rename(new_dir)
+                            # Update DB paths to reflect new folder
+                            _cur2_pre = str(new_dir / pre_path.name)
+                            _cur2_post = str(new_dir / post_path.name)
+                            with db._cursor() as _cur:
+                                _cur.execute(
+                                    "UPDATE uploads SET pre_pdf_path=%s, post_pdf_path=%s WHERE id=%s",
+                                    (_cur2_pre, _cur2_post, upload_id),
+                                )
+                            # Update output_dir reference so download still works
+                            output_dir = new_dir / output_dir.name
                     except Exception:
                         pass
 
@@ -479,10 +505,29 @@ with tab_generate:
                     )
                     if _db_available and upload_id and generated_pptx.exists():
                         try:
-                            db.save_output(upload_id, generated_pptx.read_bytes(), pptx_filename)
+                            db.save_output(upload_id, generated_pptx.read_bytes(), pptx_filename, out_dir=output_dir)
                             db.update_upload_status(upload_id, "done")
                         except Exception:
                             pass
+                    # Load chart images into memory for display, then clean up from disk
+                    try:
+                        chart_bytes_map: dict[str, bytes] = {}
+                        for key, rel_path in all_charts.items():
+                            img_path = output_dir / rel_path
+                            if img_path.exists():
+                                chart_bytes_map[rel_path] = img_path.read_bytes()
+                        st.session_state["roadmap_chart_bytes"] = chart_bytes_map
+                    except Exception:
+                        pass
+                    try:
+                        charts_dir = output_dir / "charts"
+                        if charts_dir.exists():
+                            shutil.rmtree(charts_dir)
+                        summary = output_dir / "extraction_summary.txt"
+                        if summary.exists():
+                            summary.unlink()
+                    except Exception:
+                        pass
                 except Exception as e:
                     if upload_id and _db_available:
                         db.update_upload_status(upload_id, "error")
@@ -556,15 +601,17 @@ with tab_templates:
         st.caption("Select the template type, upload your updated .pptx file, and save. It will be used immediately for all new RoadMaps.")
         st.markdown("")
 
+        _tmpl_upload_key = st.session_state.get("tmpl_upload_reset", 0)
+
         tmpl_type = st.selectbox(
             "Template type",
             ["Generic", "Lawyers"],
-            key="tmpl_tab_type",
+            key=f"tmpl_tab_type_{_tmpl_upload_key}",
         )
         tmpl_file = st.file_uploader(
             "Upload .pptx file",
             type=["pptx"],
-            key="tmpl_tab_file",
+            key=f"tmpl_tab_file_{_tmpl_upload_key}",
         )
 
         if st.button("Save & Activate Template", type="primary", use_container_width=True, key="tmpl_tab_save"):
@@ -574,6 +621,7 @@ with tab_templates:
                 with st.spinner("Saving…"):
                     try:
                         new_id = db.save_template(tmpl_type, tmpl_file.getvalue())
+                        st.session_state["tmpl_upload_reset"] = _tmpl_upload_key + 1
                         st.success(
                             f"**{tmpl_type}** template has been updated and is now active."
                         )

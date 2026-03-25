@@ -37,6 +37,9 @@ storage/
 uploads/
 outputs/
 
+# Test/debug scripts (local dev only)
+scripts/
+
 # Client and test assets (do not push to repo)
 Client Docs/
 client_documents/
