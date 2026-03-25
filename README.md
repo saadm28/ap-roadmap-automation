@@ -321,7 +321,6 @@ tar -czf storage_backup_$(date +%Y%m%d).tar.gz /var/app/storage
 - `PyMuPDF>=1.23.0`
 - `Pillow>=10.0.0`
 - `python-pptx>=0.6.21`
-- `openpyxl>=3.1.0`
 - `mysql-connector-python>=8.0.0`
 - `python-dotenv>=1.0.0`
 - `streamlit-authenticator>=0.4.0`
